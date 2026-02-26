@@ -48,7 +48,10 @@ jobs:
               const product = extract("Product Line");
               const aspect = extract("Aspect / Domain");
               const name = extract("Repository Name");
-              const tenant = extract("Tenant Name \\(Optional\\)");
+              let tenant = extract("Tenant Name \\(Optional\\)");
+              if (!tenant || tenant === "_No response_") {
+                tenant = null;
+              }
               const description = extract("Repository Description");
               const visibilityRaw = extract("Repository Visibility");
 
