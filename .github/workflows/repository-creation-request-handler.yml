@@ -115,6 +115,10 @@ jobs:
             const message = "${{ needs.process.outputs.message }}";
             const url = "${{ needs.process.outputs.repo_url }}";
 
+            console.log("DEBUG result:", result);
+            console.log("DEBUG message:", message);
+            console.log("DEBUG url:", url);
+
             let body = "";
 
             switch(result) {
