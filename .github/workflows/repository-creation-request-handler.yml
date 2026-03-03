@@ -153,17 +153,18 @@ jobs:
                   .replace(/^-|-$/g, "");
               }
 
+              // 🔹 Build Prefixed Topics
               const topics = [
-                sanitizeTopic(product),
-                sanitizeTopic(aspect),
-                sanitizeTopic(name)
+                `product-${sanitizeTopic(product)}`,
+                `aspect-${sanitizeTopic(aspect)}`,
+                `repo-${sanitizeTopic(name)}`
               ];
 
               if (tenant) {
-                topics.push(sanitizeTopic(tenant));
+                topics.push(`tenant-${sanitizeTopic(tenant)}`);
               }
 
-              console.log("Applying topics:", topics);
+              console.log("Applying prefixed topics:", topics);
 
               // 🔹 Apply Topics
               await github.rest.repos.replaceAllTopics({
