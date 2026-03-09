@@ -1,4 +1,4 @@
-name: Invoke GitLab Mirror Provisioning for ${{ github.event.repository.name }}
+name: Invoke GitLab Mirror Provisioning
 
 on:
   workflow_dispatch:
