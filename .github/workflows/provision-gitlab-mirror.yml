@@ -253,8 +253,8 @@ jobs:
 
       - name: Mirror repository to GitLab
         env:
-          GITLAB_HOST: ${{ secrets.GITLAB_HOST }}
-          GITLAB_API_TOKEN: ${{ secrets.GITLAB_API_TOKEN }}
+          GITLAB_HOST: ${{ secrets.GITLAB_HOST || vars.GITLAB_HOST }}
+          GITLAB_API_TOKEN: ${{ secrets.GITLAB_API_TOKEN || vars.GITLAB_API_TOKEN }}
           PROJECT_PATH: ${{ steps.provision.outputs.project_path }}
 
         run: |
@@ -265,6 +265,8 @@ jobs:
           echo "--------------------------------------------------"
 
           GITLAB_URL="https://oauth2:${GITLAB_API_TOKEN}@${GITLAB_HOST#https://}/${PROJECT_PATH}.git"
+
+          echo "GITLAB_URL = " $GITLAB_URL
 
           echo "Adding GitLab remote..."
           git remote add gitlab "$GITLAB_URL" || true
