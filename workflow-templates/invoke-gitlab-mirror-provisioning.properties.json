@@ -1,4 +1,5 @@
 {
     "name": "GitLab Synchronization",
-    "description": "Workflow to synchronize repository to GitLab"
+    "description": "Workflow to synchronize repository to GitLab",
+    "iconName": "gitlab-logo-500-rgb"
 }
