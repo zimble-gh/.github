@@ -163,7 +163,7 @@ jobs:
             console.log("Resolving GitLab group hierarchy...");
             console.log("------------------------------------");
 
-            const secondLevelPath = tenant ?? ORG_SUBGROUP;
+            const secondLevelPath = tenant ? `${ORG_SUBGROUP}-${tenant}` : ORG_SUBGROUP;
 
             const secondLevel  = await findOrCreateGroup(
               TOP_LEVEL_GROUP_ID,
