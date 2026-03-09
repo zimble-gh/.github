@@ -18,6 +18,7 @@ body:
       label: Product Line
       description: Select the product line this repository belongs to
       options:
+        - common
         - ewallet
         - hyperconfigurator
     validations:
