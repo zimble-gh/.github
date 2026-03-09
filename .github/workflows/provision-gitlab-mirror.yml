@@ -1,0 +1,9 @@
+on:
+    workflow_call:
+
+jobs:
+    sync-to-gitlab:
+        runs-on: ubuntu-latest
+        steps:
+            - name: "Echo Sample Message"
+              run: echo "echo from ${{github.repository}}"
