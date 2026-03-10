@@ -276,10 +276,10 @@ jobs:
           echo "Fetching all refs..."
           git fetch --all --tags
 
-          echo "Pushing mirror to GitLab..."
+          echo "Pushing branches (force)..."
 
           for i in {1..5}; do
-            git push --mirror gitlab && break
+            git push gitlab --all --force && git push gitlab --tags --force && break
             echo "Retrying mirror push..."
             sleep 5
           done
