@@ -271,6 +271,8 @@ jobs:
           echo "Adding GitLab remote..."
           git remote add gitlab "$GITLAB_URL" || true
 
+          git fetch origin '+refs/heads/*:refs/remotes/origin/*'
+
           echo "Fetching all refs..."
           git fetch --all --tags
 
