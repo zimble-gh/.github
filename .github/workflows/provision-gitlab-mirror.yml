@@ -251,12 +251,18 @@ jobs:
       # 5. Push mirror to GitLab
       # ─────────────────────────────────────────────
 
-      - name: Mirror repository to GitLab
+      - name: Generate GitHub App Token
+        uses: tibdex/github-app-token@v2
+        id: app-token
+        with:
+          app_id: ${{ secrets.APP_ID || vars.APP_ID }}
+          private_key: ${{ secrets.APP_PRIVATE_KEY || vars.APP_PRIVATE_KEY }}
+
+      - name: Mirror Repository
         env:
           GITLAB_HOST: ${{ secrets.GITLAB_HOST || vars.GITLAB_HOST }}
           GITLAB_API_TOKEN: ${{ secrets.GITLAB_API_TOKEN || vars.GITLAB_API_TOKEN }}
           PROJECT_PATH: ${{ steps.provision.outputs.project_path }}
-
         run: |
 
           echo ""
@@ -264,40 +270,11 @@ jobs:
           echo "Starting GitHub → GitLab mirror push"
           echo "--------------------------------------------------"
 
+          git clone --mirror https://x-access-token:${{ steps.app-token.outputs.token }}@github.com/${{ github.repository }}.git
+          cd $(basename ${{ github.repository }}).git
           GITLAB_URL="https://oauth2:${GITLAB_API_TOKEN}@${GITLAB_HOST#https://}/${PROJECT_PATH}.git"
-
           git remote add gitlab "$GITLAB_URL" || true
-
-          echo "Fetching branches..."
-          git fetch origin '+refs/heads/*:refs/remotes/origin/*'
-
-          echo "Fetching tags..."
-          git fetch --tags
-
-          echo "Preparing local branches..."
-
-          CURRENT_BRANCH=$(git branch --show-current)
-
-          for branch in $(git for-each-ref --format='%(refname:short)' refs/remotes/origin/ | grep -v HEAD); do
-
-            local_branch=${branch#origin/}
-
-            if [ "$local_branch" = "$CURRENT_BRANCH" ]; then
-              echo "Skipping current branch: $local_branch"
-              continue
-            fi
-
-            git branch --force "$local_branch" "$branch"
-
-          done
-
-          echo "Running mirror push..."
-
-          for i in {1..5}; do
-            git push --mirror gitlab && break
-            echo "Retrying mirror..."
-            sleep 5
-          done
+          git push --mirror gitlab
 
           echo ""
           echo "--------------------------------------------------"
