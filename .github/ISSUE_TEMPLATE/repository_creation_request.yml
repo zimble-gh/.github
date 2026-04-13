@@ -22,6 +22,7 @@ body:
         - ewallet
         - hyperconfigurator
         - pos-management
+        - reconciliation
         - switching
     validations:
       required: true
