@@ -58,7 +58,7 @@ jobs:
                 tenant = null;
               }
 
-              const description = extract("Repository Description");
+              const description = extract("Repository Description \\(Max\\. 350 characters\\)");
               const visibilityRaw = extract("Repository Visibility");
 
               let visibility;
@@ -137,7 +137,7 @@ jobs:
               const repo = await github.rest.repos.createInOrg({
                 org: context.repo.owner,
                 name: finalName,
-                description,
+                description : description.substring(0, 350), // description cannot be more than 350 characters
                 visibility,
                 auto_init: autoInit
               });
