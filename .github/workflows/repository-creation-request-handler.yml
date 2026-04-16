@@ -25,8 +25,8 @@ jobs:
       - uses: tibdex/github-app-token@v2
         id: app-token
         with:
-          app_id: ${{ secrets.APP_ID || vars.APP_ID }}
-          private_key: ${{ secrets.APP_PRIVATE_KEY || vars.APP_PRIVATE_KEY }}
+          app_id: ${{ secrets.GH_APP_ID || vars.GH_APP_ID }}
+          private_key: ${{ secrets.GH_APP_PRIVATE_KEY || vars.GH_APP_PRIVATE_KEY }}
 
       # 🧠 All Logic In One Deterministic Step
       - name: Process Request
