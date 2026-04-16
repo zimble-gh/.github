@@ -93,6 +93,12 @@ jobs:
                 ? `${product}-${aspect}-${name}-${tenant}`
                 : `${product}-${aspect}-${name}`;
 
+              if (finalName.length > 100) {
+                core.setOutput("status", "PARSE_ERROR");
+                core.setOutput("message", `Evaluated repository name is : ${finalName}\nRepository name cannot be more than 100 characters.`);
+                return;
+              }
+
               console.log("Checking duplicate for:", finalName);
 
               try {
@@ -163,6 +169,14 @@ jobs:
               if (tenant) {
                 topics.push(`tenant-${sanitizeTopic(tenant)}`);
               }
+              
+              const extraLengthyTopics = topics.filter((topic) => topic.length > 50);
+              if (extraLengthyTopics.length > 0) {
+                core.setOutput("status", "PARSE_ERROR");
+                core.setOutput("message", `Evaluated repository topics are : ${extraLengthyTopics}\nAny topic attached to the repository cannot be more than 50 characters.`);
+                return;
+              }
+
 
               console.log("Applying prefixed topics:", topics);
 
