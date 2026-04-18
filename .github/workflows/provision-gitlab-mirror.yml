@@ -12,6 +12,55 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
+      - name: Read required variables & secrets
+        uses: actions/github-script@v9
+
+        env:
+          GH_APP_ID: ${{ secrets.GH_APP_ID || vars.GH_APP_ID }}
+          GH_APP_PRIVATE_KEY: ${{ secrets.GH_APP_PRIVATE_KEY || vars.GH_APP_PRIVATE_KEY }}
+          GITLAB_HOST: ${{ secrets.GITLAB_HOST || vars.GITLAB_HOST }}
+          GITLAB_API_TOKEN: ${{ secrets.GITLAB_API_TOKEN || vars.GITLAB_API_TOKEN }}
+          GITLAB_TOP_LEVEL_GROUP_ID: ${{ secrets.GITLAB_TOP_LEVEL_GROUP_ID || vars.GITLAB_TOP_LEVEL_GROUP_ID }}
+          GITLAB_ORG_SUBGROUP: ${{ secrets.GITLAB_ORG_SUBGROUP || vars.GITLAB_ORG_SUBGROUP }}
+
+        with:
+          script: |
+
+            const requiredVarsAndSecrets = {
+              "GH_APP_ID"                 : process.env.GH_APP_ID,
+              "GH_APP_PRIVATE_KEY"        : process.env.GH_APP_PRIVATE_KEY,
+              "GITLAB_HOST"               : process.env.GITLAB_HOST,
+              "GITLAB_API_TOKEN"          : process.env.GITLAB_API_TOKEN,
+              "GITLAB_TOP_LEVEL_GROUP_ID" : process.env.GITLAB_TOP_LEVEL_GROUP_ID,
+              "GITLAB_ORG_SUBGROUP"       : process.env.GITLAB_ORG_SUBGROUP
+            };
+
+            const missingVarsAndSecrets = Object.keys(requiredVarsAndSecrets).filter((key) => !requiredVarsAndSecrets[key]);
+
+            if (missingVarsAndSecrets.length > 0) {
+              const repoFullName = `${context.repo.owner}/${context.repo.repo}`;
+              const repoVisibility = context.payload.repository.visibility;
+              const isPrivateRepo = repoVisibility === "private";
+              const errorMessage = "\nCould not detect below required variables and secrets.\n" + missingVarsAndSecrets.map((key) => "- " + key).join("\n");
+              let troubleshootInstructions = [];
+
+              if (!isPrivateRepo) {
+                troubleshootInstructions.push(`This repository '${repoFullName}' is public`);
+                troubleshootInstructions.push("For public repositories, setting the required variables and secrets at the organization level is sufficient.");
+                troubleshootInstructions.push("So, perhaps required variables and secrets are not set up properly at the organization level.");
+                troubleshootInstructions.push("Please set those and rerun this action.");
+              } else {
+                troubleshootInstructions.push(`This repository '${repoFullName}' is private.`);
+                troubleshootInstructions.push("Private repositories can consume organization level variables and secrets only with paid plan");
+                troubleshootInstructions.push("Run the 'Sync Secrets & Variables Across Private Repos' action to set the required variables and secrets at the repository level.");
+                troubleshootInstructions.push("Or, kindly upgrade the plan to consume the required variables and secrets from the organization level.");
+              }
+
+              const troubleshootMessage = troubleshootInstructions.map((msg, index) => String(index + 1).padStart(troubleshootInstructions.length, ' ') + ". " + msg).join("\n");
+
+              core.setFailed(`${errorMessage}\n\n${troubleshootMessage}`);
+              return;
+            }
 
       - name: Checkout repository
         uses: actions/checkout@v6
@@ -31,10 +80,10 @@ jobs:
         with:
           script: |
 
-            const GITLAB_HOST        = process.env.GITLAB_HOST;
-            const GITLAB_API_TOKEN   = process.env.GITLAB_API_TOKEN;
-            const TOP_LEVEL_GROUP_ID = process.env.GITLAB_TOP_LEVEL_GROUP_ID;
-            const ORG_SUBGROUP       = process.env.GITLAB_ORG_SUBGROUP;
+            const GITLAB_HOST               = process.env.GITLAB_HOST;
+            const GITLAB_API_TOKEN          = process.env.GITLAB_API_TOKEN;
+            const GITLAB_TOP_LEVEL_GROUP_ID = process.env.GITLAB_TOP_LEVEL_GROUP_ID;
+            const GITLAB_ORG_SUBGROUP       = process.env.GITLAB_ORG_SUBGROUP;
 
             const repoFullName = `${context.repo.owner}/${context.repo.repo}`;
             // const repoVisibility = context.payload.repository.visibility;
@@ -151,7 +200,7 @@ jobs:
             //
             // Without tenant:
             //   top-level-group
-            //   └── ORG_SUBGROUP
+            //   └── GITLAB_ORG_SUBGROUP
             //       └── product
             //           └── aspect
             //               └── repo
@@ -168,10 +217,10 @@ jobs:
             console.log("Resolving GitLab group hierarchy...");
             console.log("------------------------------------");
 
-            const secondLevelPath = tenant ? `${ORG_SUBGROUP}-${tenant}` : ORG_SUBGROUP;
+            const secondLevelPath = tenant ? `${GITLAB_ORG_SUBGROUP}-${tenant}` : GITLAB_ORG_SUBGROUP;
 
             const secondLevel  = await findOrCreateGroup(
-              TOP_LEVEL_GROUP_ID,
+              GITLAB_TOP_LEVEL_GROUP_ID,
               secondLevelPath,
               secondLevelPath
             );
