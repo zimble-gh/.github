@@ -47,10 +47,17 @@ jobs:
             }
 
             try {
-              const product = extract("Product Line");
-              const aspect  = extract("Aspect / Domain");
-              const name    = extract("Repository Name");
-              let   tenant  = extract("Tenant Name \\(Optional\\)");
+              const product     = extract("Product Line");
+              const aspect      = extract("Aspect / Domain");
+              const name        = extract("Repository Name");
+              const projectType = extract("Project Type");
+              let   tenant      = extract("Tenant Name \\(Optional\\)");
+
+              if (projectType.startsWith("---")) {
+                core.setOutput("status", "PARSE_ERROR");
+                core.setOutput("message", "Please select a valid project type (not a category header).");
+                return;
+              }
 
               if (!tenant || tenant === "_No response_" || tenant === "None") {
                 tenant = null;
@@ -75,7 +82,7 @@ jobs:
 
               console.log("Selected visibility: ", visibility);
 
-              if (!product || !aspect || !name || !description || !visibilityRaw) {
+              if (!product || !aspect || !projectType || !name || !description || !visibilityRaw) {
                 core.setOutput("status", "PARSE_ERROR");
                 core.setOutput("message", "Missing required fields.");
                 return;
@@ -111,6 +118,7 @@ jobs:
                 `product-${sanitizeTopic(product)}`,
                 `aspect-${sanitizeTopic(aspect)}`,
                 `repo-${sanitizeTopic(name)}`,
+                `type-${sanitizeTopic(projectType)}`,
                 "managed-by-platform"
               ];
 

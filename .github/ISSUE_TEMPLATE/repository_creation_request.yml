@@ -43,6 +43,50 @@ body:
     validations:
       required: true
 
+  - type: dropdown
+    id: project_type
+    attributes:
+      label: Project Type
+      description: Select the project/template type for this repository
+      options:
+        - --- Backend ---
+        - java-maven-library
+        - quarkus-maven-extension
+        - quarkus-maven-jdk-app
+        - quarkus-maven-native-app
+        - spring-maven-jdk-app
+        - spring-maven-native-app
+
+        - --- Flutter ---
+        - flutter-android-app
+        - flutter-ios-app
+        - flutter-webapp
+        - flutter-windows-app
+
+        - --- Frontend ---
+        - nextjs-webapp
+
+        - --- Platform ---
+        - cicd-util-scripts
+        - gitops
+        - helm-charts
+        - local-util-scripts
+        - python-pyproject
+        - python-scripts
+        - terraform-modules
+        - terraform-scripts
+
+        - --- Testing ---
+        - appium-java-scripts
+        - appium-js-scripts
+        - appium-py-scripts
+        - playwright-scripts
+
+        - --- Documentation ---
+        - doc
+    validations:
+      required: true
+
   - type: input
     id: repository_name
     attributes:
