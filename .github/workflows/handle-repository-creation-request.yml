@@ -115,11 +115,10 @@ jobs:
 
               // 🔹 Build Topics
               const topics = [
+                "managed-by-platform",
                 `product-${sanitizeTopic(product)}`,
                 `aspect-${sanitizeTopic(aspect)}`,
-                `repo-${sanitizeTopic(name)}`,
-                `type-${sanitizeTopic(projectType)}`,
-                "managed-by-platform"
+                `type-${sanitizeTopic(projectType)}`
               ];
 
               if (tenant) {
