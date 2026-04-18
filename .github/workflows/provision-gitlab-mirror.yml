@@ -16,12 +16,12 @@ jobs:
         uses: actions/github-script@v9
 
         env:
-          GH_APP_ID: ${{ secrets.GH_APP_ID || vars.GH_APP_ID }}
-          GH_APP_PRIVATE_KEY: ${{ secrets.GH_APP_PRIVATE_KEY || vars.GH_APP_PRIVATE_KEY }}
-          GITLAB_HOST: ${{ secrets.GITLAB_HOST || vars.GITLAB_HOST }}
-          GITLAB_API_TOKEN: ${{ secrets.GITLAB_API_TOKEN || vars.GITLAB_API_TOKEN }}
+          GH_APP_ID:                 ${{ secrets.GH_APP_ID || vars.GH_APP_ID }}
+          GH_APP_PRIVATE_KEY:        ${{ secrets.GH_APP_PRIVATE_KEY || vars.GH_APP_PRIVATE_KEY }}
+          GITLAB_HOST:               ${{ secrets.GITLAB_HOST || vars.GITLAB_HOST }}
+          GITLAB_API_TOKEN:          ${{ secrets.GITLAB_API_TOKEN || vars.GITLAB_API_TOKEN }}
           GITLAB_TOP_LEVEL_GROUP_ID: ${{ secrets.GITLAB_TOP_LEVEL_GROUP_ID || vars.GITLAB_TOP_LEVEL_GROUP_ID }}
-          GITLAB_MY_ORG_SUBGROUP: ${{ secrets.GITLAB_MY_ORG_SUBGROUP || vars.GITLAB_MY_ORG_SUBGROUP }}
+          GITLAB_MY_ORG_SUBGROUP:    ${{ secrets.GITLAB_MY_ORG_SUBGROUP || vars.GITLAB_MY_ORG_SUBGROUP }}
 
         with:
           script: |
@@ -72,10 +72,10 @@ jobs:
         uses: actions/github-script@v9
 
         env:
-          GITLAB_HOST: ${{ secrets.GITLAB_HOST || vars.GITLAB_HOST }}
-          GITLAB_API_TOKEN: ${{ secrets.GITLAB_API_TOKEN || vars.GITLAB_API_TOKEN }}
+          GITLAB_HOST:               ${{ secrets.GITLAB_HOST || vars.GITLAB_HOST }}
+          GITLAB_API_TOKEN:          ${{ secrets.GITLAB_API_TOKEN || vars.GITLAB_API_TOKEN }}
           GITLAB_TOP_LEVEL_GROUP_ID: ${{ secrets.GITLAB_TOP_LEVEL_GROUP_ID || vars.GITLAB_TOP_LEVEL_GROUP_ID }}
-          GITLAB_MY_ORG_SUBGROUP: ${{ secrets.GITLAB_MY_ORG_SUBGROUP || vars.GITLAB_MY_ORG_SUBGROUP }}
+          GITLAB_MY_ORG_SUBGROUP:    ${{ secrets.GITLAB_MY_ORG_SUBGROUP || vars.GITLAB_MY_ORG_SUBGROUP }}
 
         with:
           script: |
@@ -304,14 +304,14 @@ jobs:
         uses: tibdex/github-app-token@v2
         id: app-token
         with:
-          app_id: ${{ secrets.GH_APP_ID || vars.GH_APP_ID }}
+          app_id:      ${{ secrets.GH_APP_ID || vars.GH_APP_ID }}
           private_key: ${{ secrets.GH_APP_PRIVATE_KEY || vars.GH_APP_PRIVATE_KEY }}
 
       - name: Mirror Repository
         env:
-          GITLAB_HOST: ${{ secrets.GITLAB_HOST || vars.GITLAB_HOST }}
+          GITLAB_HOST:      ${{ secrets.GITLAB_HOST || vars.GITLAB_HOST }}
           GITLAB_API_TOKEN: ${{ secrets.GITLAB_API_TOKEN || vars.GITLAB_API_TOKEN }}
-          PROJECT_PATH: ${{ steps.provision.outputs.project_path }}
+          PROJECT_PATH:     ${{ steps.provision.outputs.project_path }}
         run: |
 
           echo ""
