@@ -1,4 +1,4 @@
-name: Provision GitLab mirror
+name: Provision GitLab Mirror
 
 on:
   workflow_dispatch:

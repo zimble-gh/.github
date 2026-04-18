@@ -1,4 +1,4 @@
-name: Repository Provisioning
+name: Handle Repository Creation Request
 
 on:
   issues:
