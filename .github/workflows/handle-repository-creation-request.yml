@@ -193,9 +193,43 @@ jobs:
                 names : topics
               });
 
-              core.setOutput("status", "SUCCESS");
-              core.setOutput("repo_url", repo.data.html_url);
-              core.setOutput("message", "Repository created successfully with topics applied.");
+              console.log("Repository topics applied successfully");
+
+              console.log("Setting repository variables...");
+
+              async function createVariable(name, value) {
+                if (value === null || value === undefined) return;
+
+                await github.rest.actions.createRepoVariable({
+                  owner: context.repo.owner,
+                  repo: finalName,
+                  name,
+                  value: String(value)
+                });
+              }
+
+              try {
+                await createVariable("PROJECT_METADATA_PRODUCT", product);
+                await createVariable("PROJECT_METADATA_ASPECT", aspect);
+                await createVariable("PROJECT_METADATA_NAME", name);
+                await createVariable("PROJECT_METADATA_TYPE", projectType);
+
+                if (tenant) {
+                  await createVariable("PROJECT_METADATA_TENANT", tenant);
+                }
+
+                await createVariable("PROJECT_METADATA_MANAGED", "true");
+
+                console.log("Repository variables set successfully");
+
+                core.setOutput("status", "SUCCESS");
+                core.setOutput("repo_url", repo.data.html_url);
+                core.setOutput("message", "Repository created successfully with topics applied and metadata variables.");
+
+              } catch (err) {
+                console.error("Failed to set repo variables:", err.message);
+                throw err;
+              }              
 
             } catch (unhandledError) {
               console.error("Unhandled error:", unhandledError.message);
