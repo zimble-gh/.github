@@ -2,6 +2,7 @@ name: 🏗 Repository Creation Request
 description: Request creation of a new repository under the organization
 title: "[REPO-CREATION-REQUEST] "
 labels: ["repo-creation-request", "platform-triage"]
+type: task
 
 body:
   - type: markdown
