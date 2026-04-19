@@ -24,8 +24,9 @@ jobs:
       validate_warning: ${{ steps.validate_request.outputs.warning }}
       validate_info:    ${{ steps.validate_request.outputs.info }}
 
-      duplicate_status: ${{ steps.check_repository_existence.outputs.status }}
-      duplicate_error:  ${{ steps.check_repository_existence.outputs.error }}
+      duplicate_status:  ${{ steps.check_repository_existence.outputs.status }}
+      duplicate_success: ${{ steps.check_repository_existence.outputs.success }}
+      duplicate_error:   ${{ steps.check_repository_existence.outputs.error }}
 
       create_status:   ${{ steps.create_repository.outputs.status }}
       create_success:  ${{ steps.create_repository.outputs.success }}
@@ -44,6 +45,10 @@ jobs:
       org_vars_error:   ${{ steps.copy_organization_variables.outputs.error }}
       org_vars_info:    ${{ steps.copy_organization_variables.outputs.info }}
 
+      secrets_status:  ${{ steps.sync_repository_secrets.outputs.status }}
+      secrets_success: ${{ steps.sync_repository_secrets.outputs.success }}
+      secrets_error:   ${{ steps.sync_repository_secrets.outputs.error }}
+      
     steps:
 
       - name: Generate GitHub App Token
@@ -83,28 +88,28 @@ jobs:
             let tenant           = extract("Tenant Name \\(Optional\\)");
 
             if (projectType && projectType.startsWith("---")) {
-              errors.push("Invalid Project Type selected. Please choose a valid option.");
+              errors.push("❌ Invalid Project Type selected. Please choose a valid option.");
             }
 
             if (!tenant || tenant === "_No response_" || tenant === "None") {
               tenant = null;
             }
 
-            if (!product) errors.push("Missing: Product Line");
-            if (!aspect) errors.push("Missing: Aspect / Domain");
-            if (!name) errors.push("Missing: Repository Name");
-            if (!projectType) errors.push("Missing: Project Type");
-            if (!descriptionRaw) errors.push("Missing: Repository Description");
+            if (!product) errors.push("❌ Missing: Product Line");
+            if (!aspect) errors.push("❌ Missing: Aspect / Domain");
+            if (!name) errors.push("❌ Missing: Repository Name");
+            if (!projectType) errors.push("❌ Missing: Project Type");
+            if (!descriptionRaw) errors.push("❌ Missing: Repository Description");
 
             if (name && !/^[a-z0-9-]+$/.test(name)) {
-              errors.push("Repository name must be kebab-case (lowercase, numbers, hyphens only).");
+              errors.push("❌ Repository name must be kebab-case (lowercase, numbers, hyphens only).");
             }
 
             let visibility;
             if (visibilityRaw?.includes("Private")) visibility = "private";
             else if (visibilityRaw?.includes("Public")) visibility = "public";
             else if (visibilityRaw?.includes("Internal")) visibility = "internal";
-            else errors.push("Invalid visibility option selected.");
+            else errors.push("❌ Invalid visibility option selected.");
 
             let autoInit = false;
             if (repoOptions) {
@@ -165,7 +170,7 @@ jobs:
             }
 
             if (descriptionRaw && descriptionRaw.length > 350) {
-              warnings.push("Description exceeds 350 characters and will be truncated.");
+              warnings.push("⚠️ Description exceeds 350 characters and will be truncated.");
             }
 
             const metadata = {
@@ -178,7 +183,7 @@ jobs:
             };
 
             if (errors.length > 0) {
-              errors.push("To create a new repo please edit this issue and add correct inputs and try again\nOr\nclose this and open a new issue with correct inputs.")
+              errors.push("ℹ️ To create a new repo please edit this issue and add correct inputs and try again\nOr\nclose this and open a new issue with correct inputs.")
               core.setOutput("status", "PARSE_ERROR");
               core.setOutput("error", errors.join("\n\n"));
               core.setOutput("warning", JSON.stringify(warnings));
@@ -216,13 +221,14 @@ jobs:
               const msg = `❌ Repository already exists.
             You can visit the existing repo for more clarity.
             🔗 ${repo.data.html_url}
-            To create a new repo please reopen and edit this issue and try again or create a new issue with appropriate inputs.
+            ℹ️ To create a new repo please reopen and edit this issue and try again or create a new issue with appropriate inputs.
             `;
               core.setOutput("status", "DUPLICATE_ERROR");
               core.setOutput("error", msg);
             } catch (e) {
               if (e.status === 404) {
                 core.setOutput("status", "OK");
+                core.setOutput("success", "✅ No duplicate repository.")
               } else {
                 const msg = `❌ Failed to verify if repository already exists.
 
@@ -293,7 +299,7 @@ jobs:
               });
 
               core.setOutput("status", "OK");
-              core.setOutput("success", "Topics applied successfully.");
+              core.setOutput("success", "✅ Topics applied successfully.");
 
             } catch (e) {
               const msg = `⚠️ Failed to apply repository topics.
@@ -343,7 +349,7 @@ jobs:
 
             if (failures.length === 0) {
               core.setOutput("status", "OK");
-              core.setOutput("success", "Metadata variables applied successfully.");
+              core.setOutput("success", "✅ Metadata variables applied successfully.");
             } else {
               const msg = `⚠️ Some repository metadata variables failed to be created.
 
@@ -393,7 +399,7 @@ jobs:
 
             if (!allVars || allVars.length === 0) {
               core.setOutput("status", "OK");
-              core.setOutput("info", JSON.stringify(["No organization variables found."]));
+              core.setOutput("info", JSON.stringify(["ℹ️ No organization variables found."]));
               return;
             }
 
@@ -431,7 +437,7 @@ jobs:
 
             if (failures.length === 0) {
               core.setOutput("status", "OK");
-              core.setOutput("success", "Organization variables copied successfully.");
+              core.setOutput("success", "✅ Organization variables copied successfully.");
             } else {
               const msg = `⚠️ Some organization variables failed to copy.
 
@@ -449,6 +455,36 @@ jobs:
               core.setOutput("error", msg);
             }
 
+      - name: Sync Secrets to Repository
+        id: sync_repository_secrets
+        continue-on-error: true
+        if: steps.create_repository.outputs.status == 'OK' && steps.validate_request.outputs.visibility == 'private'
+        uses: actions/github-script@v9
+        env:
+          GH_TOKEN:           ${{ steps.generate_app_token.outputs.token }}
+          REPO:               ${{ steps.validate_request.outputs.final_name }}
+          ORG:                ${{ github.repository_owner }}
+          GITLAB_API_TOKEN:   ${{ secrets.GITLAB_API_TOKEN || vars.GITLAB_API_TOKEN }}
+          GH_APP_PRIVATE_KEY: ${{ secrets.GH_APP_PRIVATE_KEY || vars.GH_APP_PRIVATE_KEY }}
+        with:
+          github-token: ${{ steps.generate_app_token.outputs.token }}
+          script: |
+            try {
+              const { execSync } = require("child_process");
+
+              const repo = `${process.env.ORG}/${process.env.REPO}`;
+
+              execSync(`echo "${process.env.GITLAB_API_TOKEN}" | gh secret set GITLAB_API_TOKEN --repo ${repo}`);
+              execSync(`echo "${process.env.GH_APP_PRIVATE_KEY}" | gh secret set GH_APP_PRIVATE_KEY --repo ${repo}`);
+
+              core.setOutput("status", "OK");
+              core.setOutput("success", "✅ Secrets synced successfully.");
+
+            } catch (e) {
+              core.setOutput("status", "ERROR");
+              core.setOutput("error", `⚠️ Failed to sync secrets.\n\nError: ${e.message}`);
+            }
+            
   update_issue_status:
     name: Update Issue Status
     needs: provision_repository
@@ -484,19 +520,24 @@ jobs:
               warnings.push(...safeParse(d.validate_warning));
             }
 
-            if (d.duplicate_status === "DUPLICATE_ERROR" || d.duplicate_status === "ERROR") {
-              errors.push(d.duplicate_error);
-            }
+            if (d.duplicate_status === "DUPLICATE_ERROR"
+             || d.duplicate_status === "ERROR") errors.push(d.duplicate_error);
+            else if (d.duplicate_status === "OK") success.push(d.duplicate_success);  
 
-            if (d.create_status === "ERROR") {
-              errors.push(d.create_error);
-            } else if (d.create_status === "OK") {
-              success.push(d.create_success);
-            }
+            if (d.create_status === "ERROR") errors.push(d.create_error);
+            else if (d.create_status === "OK") success.push(d.create_success);
 
             if (d.topics_status === "ERROR") warnings.push(d.topics_error);
+            else if (d.topics_status === "OK") success.push(d.topics_success);            
+
             if (d.metadata_status === "ERROR") warnings.push(d.metadata_error);
+            else if (d.metadata_status === "OK") success.push(d.metadata_success);            
+
             if (d.org_vars_status === "ERROR") warnings.push(d.org_vars_error);
+            else if (d.org_vars_status === "OK") success.push(d.org_vars_success);            
+
+            if (d.secrets_status === "ERROR") warnings.push(d.secrets_error)
+            else if (d.secrets_status === "OK") success.push(d.secrets_success);            
 
             if (d.org_vars_info) info.push(d.org_vars_info);
 
