@@ -66,6 +66,10 @@ jobs:
               return match ? match[1].trim() : null;
             }
 
+            function isChecked(block, label) {
+              return block?.includes(`- [x] ${label}`);
+            }
+
             let errors = [];
             let warnings = [];
 
@@ -104,11 +108,7 @@ jobs:
 
             let autoInit = false;
             if (repoOptions) {
-              if (repoOptions.includes("- [x] Initialize repository with README")) {
-                autoInit = true;
-              } else if (repoOptions !== "_No response_") {
-                errors.push("Invalid repository options selection.");
-              }
+              autoInit = isChecked(repoOptions, "Initialize repository with README");
             }
 
             let finalName = null;
