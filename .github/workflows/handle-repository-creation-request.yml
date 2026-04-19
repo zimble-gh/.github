@@ -22,6 +22,7 @@ jobs:
       duplicate_message: ${{ steps.duplicate.outputs.message }}
       create_status:     ${{ steps.create.outputs.status }}
       topics_status:     ${{ steps.topics.outputs.status }}
+      topics_message:    ${{ steps.topics.outputs.message }}
       metadata_status:   ${{ steps.metadata.outputs.status }}
       orgvars_status:    ${{ steps.orgvars.outputs.status }}
 
@@ -309,15 +310,29 @@ jobs:
           script: |
             try {
               const topics = JSON.parse(process.env.TOPICS);
+
               await github.rest.repos.replaceAllTopics({
                 owner: context.repo.owner,
                 repo: process.env.FINAL_NAME,
                 names: topics
               });
+
               core.setOutput("status", "OK");
+
             } catch (e) {
+
+              const msg = `Failed to apply repository topics.
+
+            Repository: ${process.env.FINAL_NAME}
+
+            Topics:
+            ${process.env.TOPICS}
+
+            Error:
+            ${e.message}`;
+
               core.setOutput("status", "ERROR");
-              core.setOutput("message", e.message);
+              core.setOutput("message", msg);
             }
 
       # =========================
@@ -403,6 +418,7 @@ jobs:
           DUPLICATE_MESSAGE: ${{ needs.process.outputs.duplicate_message }}
           CREATE_STATUS:     ${{ needs.process.outputs.create_status }}
           TOPICS_STATUS:     ${{ needs.process.outputs.topics_status }}
+          TOPICS_MESSAGE:    ${{ needs.process.outputs.topics_message }}
           METADATA_STATUS:   ${{ needs.process.outputs.metadata_status }}
           ORGVARS_STATUS:    ${{ needs.process.outputs.orgvars_status }}
           MESSAGE:           ${{ needs.process.outputs.message }}
@@ -425,8 +441,9 @@ jobs:
               body = `❌ Repo creation failed: ${s.MESSAGE}`;
             } else if (s.CREATE_STATUS === "OK") {
 
-              if (s.TOPICS_STATUS === "ERROR")
-                warnings.push("Failed to apply topics");
+              if (s.TOPICS_STATUS === "ERROR") {
+                warnings.push(`⚠️ Topics step failed:\n${s.TOPICS_MESSAGE}`);
+              }
 
               if (s.METADATA_STATUS === "ERROR")
                 warnings.push("Failed to set metadata variables");
