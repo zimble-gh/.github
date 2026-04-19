@@ -60,11 +60,11 @@ jobs:
 #? actions/create-github-app-token@v3 has app-id parameter also that parameter may provide longer living tokens. Need to dive more and explore.
 #? app-id parameter with actions/create-github-app-token@v3 is deprecated. So need to find way to increase the token validity.
       - name: Generate GitHub App Token
-        uses: tibdex/github-app-token@v2
+        uses: actions/create-github-app-token@v3
         id: generate_app_token
         with:
-          app_id:      ${{ secrets.GH_APP_ID || vars.GH_APP_ID }}
-          private_key: ${{ secrets.GH_APP_PRIVATE_KEY || vars.GH_APP_PRIVATE_KEY }}
+          app-id:      ${{ secrets.GH_APP_ID || vars.GH_APP_ID }}
+          private-key: ${{ secrets.GH_APP_PRIVATE_KEY || vars.GH_APP_PRIVATE_KEY }}
 
       - name: Validate Issue Input
         id: validate_request
