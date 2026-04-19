@@ -52,8 +52,12 @@ jobs:
               return match ? match[1].trim() : null;
             }
 
+            let errors = [];
             let warnings = [];
 
+            // =========================
+            // Extract
+            // =========================
             const product        = extract("Product Line");
             const aspect         = extract("Aspect / Domain");
             const name           = extract("Repository Name");
@@ -63,85 +67,150 @@ jobs:
             const repoOptions    = extract("Repository Options \\(Optional\\)");
             let   tenant         = extract("Tenant Name \\(Optional\\)");
 
+            // =========================
+            // Normalize tenant
+            // =========================
             if (!tenant || tenant === "_No response_" || tenant === "None") {
               tenant = null;
             }
 
+            // =========================
+            // Required field validation
+            // =========================
+            if (!product)        errors.push("Missing: Product Line");
+            if (!aspect)         errors.push("Missing: Aspect / Domain");
+            if (!name)           errors.push("Missing: Repository Name");
+            if (!projectType)    errors.push("Missing: Project Type");
+            if (!descriptionRaw) errors.push("Missing: Repository Description");
+
+            // =========================
+            // Name validation
+            // =========================
+            if (name && !/^[a-z0-9-]+$/.test(name)) {
+              errors.push("Repository name must be kebab-case (lowercase, numbers, hyphens only).");
+            }
+
+            // =========================
+            // Visibility
+            // =========================
             let visibility;
-            if (visibilityRaw.includes("Private")) visibility = "private";
-            else if (visibilityRaw.includes("Public")) visibility = "public";
-            else if (visibilityRaw.includes("Internal")) visibility = "internal";
-            else {
-              core.setOutput("status", "PARSE_ERROR");
-              core.setOutput("message", "Invalid visibility option selected.");
-              return;
+
+            if (visibilityRaw?.includes("Private")) {
+              visibility = "private";
+            } else if (visibilityRaw?.includes("Public")) {
+              visibility = "public";
+            } else if (visibilityRaw?.includes("Internal")) {
+              visibility = "internal";
+            } else {
+              errors.push("Invalid visibility option selected.");
             }
 
+            // =========================
+            // Auto Init
+            // =========================
             let autoInit = false;
-            if (repoOptions && repoOptions.includes("- [x] Initialize repository with README")) {
-              autoInit = true;
+
+            if (repoOptions) {
+              if (repoOptions.includes("- [x] Initialize repository with README")) {
+                autoInit = true;
+              } else if (repoOptions !== "_No response_") {
+                errors.push("Invalid repository options selection.");
+              }
             }
 
-            if (!product || !aspect || !name || !projectType || !descriptionRaw) {
-              core.setOutput("status", "PARSE_ERROR");
-              core.setOutput("message", "Missing required fields.");
-              return;
+            // =========================
+            // Compute final repo name
+            // =========================
+            let finalName = null;
+
+            if (product && aspect && name) {
+              finalName = tenant
+                ? `${product}-${aspect}-${name}-${tenant}`
+                : `${product}-${aspect}-${name}`;
+
+              if (finalName.length > 100) {
+                errors.push(
+                  `❌ Repository name exceeds allowed length.
+
+            Allowed max length: 100 characters  
+            Computed final repository name:
+            ${finalName}
+
+            Computed length: ${finalName.length}
+
+            👉 Naming format:
+            <product>-<aspect>-<name>[-<tenant>]`
+                );
+              }
             }
 
-            if (!/^[a-z0-9-]+$/.test(name)) {
-              core.setOutput("status", "PARSE_ERROR");
-              core.setOutput("message", "Repository name must be kebab-case.");
-              return;
-            }
-
-            const finalName = tenant
-              ? `${product}-${aspect}-${name}-${tenant}`
-              : `${product}-${aspect}-${name}`;
-
-            if (finalName.length > 100) {
-              core.setOutput("status", "PARSE_ERROR");
-              core.setOutput("message", `Repository name too long:\n${finalName}`);
-              return;
-            }
-
+            // =========================
+            // Topics
+            // =========================
             function sanitize(v) {
               return v.toLowerCase().replace(/[^a-z0-9-]/g, "-");
             }
 
-            const topics = [
-              "managed-by-platform",
-              `product-${sanitize(product)}`,
-              `aspect-${sanitize(aspect)}`,
-              `repo-${sanitize(name)}`,
-              `type-${sanitize(projectType)}`
-            ];
+            let topics = [];
 
-            if (tenant) topics.push(`tenant-${sanitize(tenant)}`);
+            if (product && aspect && name && projectType) {
+              topics = [
+                "managed-by-platform",
+                `product-${sanitize(product)}`,
+                `aspect-${sanitize(aspect)}`,
+                `repo-${sanitize(name)}`,
+                `type-${sanitize(projectType)}`
+              ];
 
-            const longTopics = topics.filter(t => t.length > 50);
+              if (tenant) topics.push(`tenant-${sanitize(tenant)}`);
 
-            if (longTopics.length > 0) {
-              core.setOutput("status", "PARSE_ERROR");
-              core.setOutput(
-                "message",
-                `❌ Some generated repository topics are too long (>50 chars):\n\n${longTopics.join("\n")}\n\n👉 Please shorten inputs (product/aspect/name/tenant).`
+              const longTopics = topics.filter(t => t.length > 50);
+
+              if (longTopics.length > 0) {
+                errors.push(
+                  `❌ Some repository topics exceed 50 characters:
+
+            ${longTopics.join("\n")}
+
+            👉 Please shorten input values.`
+                );
+              }
+            }
+
+            // =========================
+            // Description warning
+            // =========================
+            if (descriptionRaw && descriptionRaw.length > 350) {
+              warnings.push(
+                "Description exceeds 350 characters and will be truncated."
               );
+            }
+
+            // =========================
+            // Metadata JSON
+            // =========================
+            const metadata = {
+              REPO_METADATA_PRODUCTLINE: product,
+              REPO_METADATA_ASPECT: aspect,
+              REPO_METADATA_NAME: name,
+              REPO_METADATA_TYPE: projectType,
+              REPO_METADATA_TENANT: tenant,
+              REPO_METADATA_MANAGED: true
+            };
+
+            // =========================
+            // FINAL DECISION
+            // =========================
+            if (errors.length > 0) {
+              core.setOutput("status", "PARSE_ERROR");
+              core.setOutput("message", errors.join("\n\n"));
+              core.setOutput("warnings", JSON.stringify(warnings));
               return;
             }
 
-            if (descriptionRaw.length > 350) {
-              warnings.push("Description exceeds 350 characters and will be truncated.");
-            }
-
-            const metadata = {
-              REPO_METADATA_PRODUCTLINE : product,
-              REPO_METADATA_ASPECT      : aspect,
-              REPO_METADATA_NAME        : name,
-              REPO_METADATA_TYPE        : projectType,
-              REPO_METADATA_TENANT      : tenant,
-              REPO_METADATA_MANAGED     : true
-            };
-
+            // =========================
+            // SUCCESS OUTPUTS
+            // =========================
             core.setOutput("status", "OK");
             core.setOutput("final_name", finalName);
             core.setOutput("visibility", visibility);
