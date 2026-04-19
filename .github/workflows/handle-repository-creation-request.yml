@@ -15,30 +15,36 @@ jobs:
       contains(github.event.issue.labels.*.name, 'repo-creation-request') &&
       startsWith(github.event.issue.title, '[REPO-CREATION-REQUEST]')
     runs-on: ubuntu-latest
+
     outputs:
-      status:   ${{ steps.logic.outputs.status }}
-      message:  ${{ steps.logic.outputs.message }}
-      repo_url: ${{ steps.logic.outputs.repo_url }}
+      validate_status:  ${{ steps.validate.outputs.status }}
+      duplicate_status: ${{ steps.duplicate.outputs.status }}
+      create_status:    ${{ steps.create.outputs.status }}
+      topics_status:    ${{ steps.topics.outputs.status }}
+      metadata_status:  ${{ steps.metadata.outputs.status }}
+      orgvars_status:   ${{ steps.orgvars.outputs.status }}
+
+      message:   ${{ steps.create.outputs.message || steps.validate.outputs.message }}
+      repo_url:  ${{ steps.create.outputs.repo_url }}
+      warnings:  ${{ steps.validate.outputs.warnings }}
 
     steps:
-      # 🔐 Generate GitHub App Token
+
       - uses: tibdex/github-app-token@v2
         id: app-token
         with:
           app_id:      ${{ secrets.GH_APP_ID || vars.GH_APP_ID }}
           private_key: ${{ secrets.GH_APP_PRIVATE_KEY || vars.GH_APP_PRIVATE_KEY }}
 
-      # 🧠 All Logic In One Deterministic Step
-      - name: Process Request
-        id: logic
+      # =========================
+      # VALIDATE
+      # =========================
+      - name: Validate Input
+        id: validate
         uses: actions/github-script@v9
         with:
-          github-token: ${{ steps.app-token.outputs.token }}
           script: |
             const body = context.payload.issue.body;
-
-            console.log("----- Repository Provisioning Started -----");
-            console.log("Issue : ", context.issue.number);
 
             function extract(label) {
               const regex  = new RegExp(`### ${label}\\s+([\\s\\S]*?)(?=\\n###|$)`);
@@ -46,298 +52,293 @@ jobs:
               return match ? match[1].trim() : null;
             }
 
-            try {
-              const product     = extract("Product Line");
-              const aspect      = extract("Aspect / Domain");
-              const name        = extract("Repository Name");
-              const projectType = extract("Project Type");
-              let   tenant      = extract("Tenant Name \\(Optional\\)");
+            let warnings = [];
 
-              if (projectType.startsWith("---")) {
-                core.setOutput("status", "PARSE_ERROR");
-                core.setOutput("message", "Please select a valid project type (not a category header).");
-                return;
-              }
-
-              if (!tenant || tenant === "_No response_" || tenant === "None") {
-                tenant = null;
-              }
-
-              const description   = extract("Repository Description \\(Max\\. 350 characters\\)");
-              const visibilityRaw = extract("Repository Visibility");
-
-              let visibility;
-
-              if (visibilityRaw.includes("Private")) {
-                visibility = "private";
-              } else if (visibilityRaw.includes("Public")) {
-                visibility = "public";
-              } else if (visibilityRaw.includes("Internal")) {
-                visibility = "internal";
-              } else {
-                core.setOutput("status", "PARSE_ERROR");
-                core.setOutput("message", "Invalid visibility option selected.");
-                return;
-              }
-
-              console.log("Selected visibility: ", visibility);
-
-              if (!product || !aspect || !projectType || !name || !description || !visibilityRaw) {
-                core.setOutput("status", "PARSE_ERROR");
-                core.setOutput("message", "Missing required fields.");
-                return;
-              }
-
-              if (!/^[a-z0-9-]+$/.test(name)) {
-                core.setOutput("status", "PARSE_ERROR");
-                core.setOutput("message", "Repository name must be kebab-case.");
-                return;
-              }
-
-              const finalName = tenant
-                ? `${product}-${aspect}-${name}-${tenant}`
-                : `${product}-${aspect}-${name}`;
-
-              if (finalName.length > 100) { // repository name cannot be more than 100 characters
-                core.setOutput("status", "PARSE_ERROR");
-                core.setOutput("message", `Evaluated repository name is :\n${finalName}\n\nRepository name cannot be more than 100 characters.`);
-                return;
-              }
-
-              // 🔹 Topic Sanitizer
-              function sanitizeTopic(value) {
-                return value
-                  .toLowerCase()
-                  .replace(/[^a-z0-9-]/g, "-")
-                  .replace(/-+/g, "-")
-                  .replace(/^-|-$/g, "");
-              }
-
-              // 🔹 Build Topics
-              const topics = [
-                "managed-by-platform",
-                `product-${sanitizeTopic(product)}`,
-                `aspect-${sanitizeTopic(aspect)}`,
-                `type-${sanitizeTopic(projectType)}`
-              ];
-
-              if (tenant) {
-                topics.push(`tenant-${sanitizeTopic(tenant)}`);
-              }
-              
-              const extraLengthyTopics = topics.filter((topic) => topic.length > 50); // repository topic cannot be more than 50 characters
-              if (extraLengthyTopics.length > 0) {
-                core.setOutput("status", "PARSE_ERROR");
-                core.setOutput("message", `Evaluated repository topics are :\n${extraLengthyTopics}\n\nAny topic attached to the repository cannot be more than 50 characters.`);
-                return;
-              }
-
-              console.log("Checking duplicate for: ", finalName);
-
-              try {
-                const repo = await github.rest.repos.get({
-                  owner : context.repo.owner,
-                  repo  : finalName
-                });
-
-                core.setOutput("status", "DUPLICATE");
-                core.setOutput("repo_url", repo.data.html_url);
-                core.setOutput("message", "Repository already exists.");
-                return;
-
-              } catch (duplicateCheckError) {
-
-                if (duplicateCheckError.status === 404) {
-                  console.log("No duplicate found.");
-                } else {
-                  console.error("Duplicate check failed:", duplicateCheckError.message);
-
-                  core.setOutput("status", "ERROR");
-                  core.setOutput("message", `Duplicate verification failed : ${duplicateCheckError.message}`);
-                  return;
-                }
-              }
-
-              const repositoryOptionsRaw = extract("Repository Options \\(Optional\\)");
-
-              let autoInit = false;
-
-              if (
-                repositoryOptionsRaw &&
-                repositoryOptionsRaw.includes("- [x] Initialize repository with README")
-              ) {
-                autoInit = true;
-              }
-
-              console.log("Auto init:", autoInit);
-
-              console.log("Creating repository:", finalName);
-
-              const repo = await github.rest.repos.createInOrg({
-                org         : context.repo.owner,
-                name        : finalName,
-                description : description.substring(0, 350), // description cannot be more than 350 characters
-                visibility,
-                auto_init   : autoInit
-              });
-
-              console.log("Repository created:", repo.data.html_url);
-
-              console.log("Applying prefixed topics:", topics);
-
-              // 🔹 Apply Topics
-              await github.rest.repos.replaceAllTopics({
-                owner : context.repo.owner,
-                repo  : finalName,
-                names : topics
-              });
-
-              console.log("Repository topics applied successfully");
-
-              console.log("Setting repository metadata variables...");
-
-              async function createVariable(name, value) {
-                if (value === null || value === undefined) return;
-
-                await github.rest.actions.createRepoVariable({
-                  owner: context.repo.owner,
-                  repo: finalName,
-                  name,
-                  value: String(value)
-                });
-              }
-
-              try {
-                await createVariable("PROJECT_METADATA_PRODUCT", product);
-                await createVariable("PROJECT_METADATA_ASPECT", aspect);
-                await createVariable("PROJECT_METADATA_NAME", name);
-                await createVariable("PROJECT_METADATA_TYPE", projectType);
-
-                if (tenant) {
-                  await createVariable("PROJECT_METADATA_TENANT", tenant);
-                }
-
-                await createVariable("PROJECT_METADATA_MANAGED", "true");
-
-                console.log("Repository metadata variables set successfully");
-
-                if (visibility === "private") {
-
-                  core.info(`Fetching organization-level variables for: ${context.repo.owner}`);
-
-                  let varsList = [];
-
-                  try {
-                    varsList = await github.paginate(
-                      github.rest.actions.listOrgVariables,
-                      {
-                        org      : context.repo.owner,
-                        per_page : 100
-                      }
-                    );
-                  } catch (err) {
-                    core.setFailed(`Failed to fetch org variables: ${err.message}`);
-                    return;
-                  }
-
-                  if (!varsList || varsList.length === 0) {
-                    core.warning("No organization-level variables found.");
-                    return;
-                  }
-
-                  const vars = {};
-
-                  for (const v of varsList) {
-                    // Optional: skip selected visibility if needed
-                    if (v.visibility === "selected") {
-                      core.info(`Skipping selected variable: ${v.name}`);
-                      continue;
-                    }
-                    vars[v.name] = v.value;
-                  }
-
-                  core.info(`Org variables found (${Object.keys(vars).length}): ${Object.keys(vars).join(", ")}`);
-
-                  console.log("Applying org variables to private repo...");
-
-                  for (const variable of Object.keys(vars)) {
-                    await github.rest.actions.createRepoVariable({
-                      owner: context.repo.owner,
-                      repo: finalName,
-                      name: variable,
-                      value: vars[variable]
-                    });
-                  }
-
-                  console.log("Org variables copied successfully.");
-                }
-
-
-                core.setOutput("status", "SUCCESS");
-                core.setOutput("repo_url", repo.data.html_url);
-                core.setOutput("message", "Repository created successfully with topics and metadata variables applied.");
-
-              } catch (err) {
-                console.error("Failed to set repo variables:", err.message);
-                throw err;
-              }              
-
-            } catch (unhandledError) {
-              console.error("Unhandled error:", unhandledError.message);
-
-              core.setOutput("status", "ERROR");
-              core.setOutput("message", unhandledError.message);
+            const product       = extract("Product Line");
+            const aspect        = extract("Aspect / Domain");
+            const name          = extract("Repository Name");
+            const projectType   = extract("Project Type");
+            const description   = extract("Repository Description \\(Max\\. 350 characters\\)");
+            const visibilityRaw = extract("Repository Visibility");
+            const repoOptions   = extract("Repository Options \\(Optional\\)");
+            let   tenant        = extract("Tenant Name \\(Optional\\)");
+            
+            if (!tenant || tenant === "_No response_" || tenant === "None") {
+              tenant = null;
             }
 
+            let visibility;
+            if (visibilityRaw.includes("Private")) visibility = "private";
+            else if (visibilityRaw.includes("Public")) visibility = "public";
+            else if (visibilityRaw.includes("Internal")) visibility = "internal";
+            else {
+              core.setOutput("status", "PARSE_ERROR");
+              core.setOutput("message", "Invalid visibility option selected.");
+              return;
+            }
+
+            let autoInit = false;
+            if (repoOptions && repoOptions.includes("- [x] Initialize repository with README")) {
+              autoInit = true;
+            }
+
+            if (!product || !aspect || !name || !projectType || !description) {
+              core.setOutput("status", "PARSE_ERROR");
+              core.setOutput("message", "Missing required fields.");
+              return;
+            }
+
+            if (!/^[a-z0-9-]+$/.test(name)) {
+              core.setOutput("status", "PARSE_ERROR");
+              core.setOutput("message", "Repository name must be kebab-case.");
+              return;
+            }
+
+            const finalName = tenant
+              ? `${product}-${aspect}-${name}-${tenant}`
+              : `${product}-${aspect}-${name}`;
+
+            if (finalName.length > 100) {
+              core.setOutput("status", "PARSE_ERROR");
+              core.setOutput("message", `Repository name too long:\n${finalName}`);
+              return;
+            }
+
+            function sanitize(v) {
+              return v.toLowerCase().replace(/[^a-z0-9-]/g, "-");
+            }
+
+            const topics = [
+              "managed-by-platform",
+              `product-${sanitize(product)}`,
+              `aspect-${sanitize(aspect)}`,
+              `repo-${sanitize(name)}`,
+              `type-${sanitize(projectType)}`
+            ];
+
+            if (tenant) topics.push(`tenant-${sanitize(tenant)}`);
+
+            if (topics.some(t => t.length > 50)) {
+              core.setOutput("status", "PARSE_ERROR");
+              core.setOutput("message", "Topic length exceeded.");
+              return;
+            }
+
+            if (description.length > 350) {
+              warnings.push("Description exceeds 350 characters and will be truncated.");
+            }
+
+            const metadata = {
+              REPO_METADATA_PRODUCTLINE: product,
+              REPO_METADATA_ASPECT: aspect,
+              REPO_METADATA_NAME: name,
+              REPO_METADATA_TYPE: projectType,
+              REPO_METADATA_TENANT: tenant,
+              REPO_METADATA_MANAGED: true
+            };
+
+            core.setOutput("status", "OK");
+            core.setOutput("final_name", finalName);
+            core.setOutput("visibility", visibility);
+            core.setOutput("auto_init", autoInit);
+            core.setOutput("topics", JSON.stringify(topics));
+            core.setOutput("metadata", JSON.stringify(metadata));
+            core.setOutput("description", description.substring(0, 350));
+            core.setOutput("warnings", JSON.stringify(warnings));
+
+      # =========================
+      # DUPLICATE CHECK
+      # =========================
+      - name: Check Duplicate
+        id: duplicate
+        if: steps.validate.outputs.status == 'OK'
+        uses: actions/github-script@v9
+        with:
+          github-token: ${{ steps.app-token.outputs.token }}
+          script: |
+            const repo = "${{ steps.validate.outputs.final_name }}";
+            try {
+              await github.rest.repos.get({ owner: context.repo.owner, repo });
+              core.setOutput("status", "DUPLICATE_ERROR");
+            } catch (e) {
+              if (e.status === 404) core.setOutput("status", "OK");
+              else {
+                core.setOutput("status", "ERROR");
+                core.setOutput("message", e.message);
+              }
+            }
+
+      # =========================
+      # CREATE REPO
+      # =========================
+      - name: Create Repo
+        id: create
+        if: steps.duplicate.outputs.status == 'OK'
+        uses: actions/github-script@v9
+        with:
+          github-token: ${{ steps.app-token.outputs.token }}
+          script: |
+            try {
+              const repo = await github.rest.repos.createInOrg({
+                org: context.repo.owner,
+                name: "${{ steps.validate.outputs.final_name }}",
+                description: "${{ steps.validate.outputs.description }}",
+                visibility: "${{ steps.validate.outputs.visibility }}",
+                auto_init: "${{ steps.validate.outputs.auto_init }}" === "true"
+              });
+
+              core.setOutput("status", "OK");
+              core.setOutput("repo_url", repo.data.html_url);
+
+            } catch (e) {
+              core.setOutput("status", "ERROR");
+              core.setOutput("message", e.message);
+            }
+
+      # =========================
+      # TOPICS
+      # =========================
+      - name: Add Topics
+        id: topics
+        continue-on-error: true
+        if: steps.create.outputs.status == 'OK'
+        uses: actions/github-script@v9
+        with:
+          github-token: ${{ steps.app-token.outputs.token }}
+          script: |
+            try {
+              const topics = JSON.parse('${{ steps.validate.outputs.topics }}');
+              await github.rest.repos.replaceAllTopics({
+                owner: context.repo.owner,
+                repo: "${{ steps.validate.outputs.final_name }}",
+                names: topics
+              });
+              core.setOutput("status", "OK");
+            } catch (e) {
+              core.setOutput("status", "ERROR");
+              core.setOutput("message", e.message);
+            }
+
+      # =========================
+      # METADATA VARIABLES
+      # =========================
+      - name: Add Metadata Variables
+        id: metadata
+        continue-on-error: true
+        if: steps.create.outputs.status == 'OK'
+        uses: actions/github-script@v9
+        with:
+          github-token: ${{ steps.app-token.outputs.token }}
+          script: |
+            try {
+              const metadata = JSON.parse('${{ steps.validate.outputs.metadata }}');
+              for (const [k, v] of Object.entries(metadata)) {
+                if (v !== null) {
+                  await github.rest.actions.createRepoVariable({
+                    owner: context.repo.owner,
+                    repo: "${{ steps.validate.outputs.final_name }}",
+                    name: k,
+                    value: String(v)
+                  });
+                }
+              }
+              core.setOutput("status", "OK");
+            } catch (e) {
+              core.setOutput("status", "ERROR");
+              core.setOutput("message", e.message);
+            }
+
+      # =========================
+      # ORG VAR COPY
+      # =========================
+      - name: Copy Org Variables
+        id: orgvars
+        continue-on-error: true
+        if: steps.create.outputs.status == 'OK' && steps.validate.outputs.visibility == 'private'
+        uses: actions/github-script@v9
+        with:
+          github-token: ${{ steps.app-token.outputs.token }}
+          script: |
+            try {
+              const res = await github.rest.actions.listOrgVariables({
+                org: context.repo.owner
+              });
+
+              for (const v of res.data.variables) {
+                await github.rest.actions.createRepoVariable({
+                  owner: context.repo.owner,
+                  repo: "${{ steps.validate.outputs.final_name }}",
+                  name: v.name,
+                  value: v.value
+                });
+              }
+
+              core.setOutput("status", "OK");
+
+            } catch (e) {
+              core.setOutput("status", "ERROR");
+              core.setOutput("message", e.message);
+            }
+
+  # =========================
+  # FINALIZE
+  # =========================
   finalize:
     needs: process
+    if: always()
     runs-on: ubuntu-latest
 
     steps:
-      - name: Comment & Close if needed
+      - name: Comment & Close
         uses: actions/github-script@v9
-        env:
-          STATUS:  ${{ needs.process.outputs.status }}
-          MESSAGE: ${{ needs.process.outputs.message }}
-          URL:     ${{ needs.process.outputs.repo_url }}
         with:
           script: |
-            const status  = process.env.STATUS;
-            const message = process.env.MESSAGE;
-            const url     = process.env.URL;
+            const s = needs.process.outputs;
 
-            console.log("DEBUG status  : ", status);
-            console.log("DEBUG message : ", message);
-            console.log("DEBUG url     : ", url);
+            const url = s.repo_url;
+            const warnings = JSON.parse(s.warnings || "[]");
 
             let body = "";
 
-            switch(status) {
-              case "SUCCESS":
-                body = `✅ ${message}\n\n🔗 ${url}`;
-                break;
-              case "DUPLICATE":
-                body = `❌ ${message}\n\n🔗 ${url}\n\nPlease reopen the issue, edit and correct it or open a fresh issue with corrected values.`;
-                break;
-              case "PARSE_ERROR":
-                body = `❌ ${message}\n\nPlease edit the issue and correct it.`;
-                break;
-              default:
-                body = `❌ Unexpected error: ${message}`;
+            if (s.validate_status === "PARSE_ERROR") {
+              body = `❌ ${s.message}`;
+            } else if (s.duplicate_status === "DUPLICATE_ERROR") {
+              body = `❌ Repository already exists.\n\nPlease edit and retry.`;
+            } else if (s.create_status === "ERROR") {
+              body = `❌ Repo creation failed: ${s.message}`;
+            } else if (s.create_status === "OK") {
+
+              if (s.topics_status === "ERROR")
+                warnings.push("Failed to apply topics");
+
+              if (s.metadata_status === "ERROR")
+                warnings.push("Failed to set metadata variables");
+
+              if (s.orgvars_status === "ERROR")
+                warnings.push("Failed to copy org variables");
+
+              if (warnings.length === 0) {
+                body = `✅ Repository created successfully\n\n🔗 ${url}`;
+              } else {
+                body = `⚠️ Repository created with warnings:\n\n${warnings.join("\n")}\n\n🔗 ${url}`;
+              }
             }
 
             await github.rest.issues.createComment({
-              owner        : context.repo.owner,
-              repo         : context.repo.repo,
-              issue_number : context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
               body
             });
 
-            if (status === "SUCCESS" || status === "DUPLICATE") {
+            if (
+              s.create_status === "OK" ||
+              s.duplicate_status === "DUPLICATE_ERROR"
+            ) {
               await github.rest.issues.update({
-                owner        : context.repo.owner,
-                repo         : context.repo.repo,
-                issue_number : context.issue.number,
-                state        : "closed"
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: context.issue.number,
+                state: "closed"
               });
             }
