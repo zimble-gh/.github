@@ -194,7 +194,7 @@ jobs:
 
               console.log("Repository topics applied successfully");
 
-              console.log("Setting repository variables...");
+              console.log("Setting repository metadata variables...");
 
               async function createVariable(name, value) {
                 if (value === null || value === undefined) return;
@@ -219,11 +219,63 @@ jobs:
 
                 await createVariable("PROJECT_METADATA_MANAGED", "true");
 
-                console.log("Repository variables set successfully");
+                console.log("Repository metadata variables set successfully");
+
+                if (visibility === "private") {
+
+                  core.info(`Fetching organization-level variables for: ${context.repo.owner}`);
+
+                  let varsList = [];
+
+                  try {
+                    varsList = await github.paginate(
+                      github.rest.actions.listOrgVariables,
+                      {
+                        org      : context.repo.owner,
+                        per_page : 100
+                      }
+                    );
+                  } catch (err) {
+                    core.setFailed(`Failed to fetch org variables: ${err.message}`);
+                    return;
+                  }
+
+                  if (!varsList || varsList.length === 0) {
+                    core.warning("No organization-level variables found.");
+                    return;
+                  }
+
+                  const vars = {};
+
+                  for (const v of varsList) {
+                    // Optional: skip selected visibility if needed
+                    if (v.visibility === "selected") {
+                      core.info(`Skipping selected variable: ${v.name}`);
+                      continue;
+                    }
+                    vars[v.name] = v.value;
+                  }
+
+                  core.info(`Org variables found (${Object.keys(vars).length}): ${Object.keys(vars).join(", ")}`);
+
+                  console.log("Applying org variables to private repo...");
+
+                  for (const variable of Object.keys(vars)) {
+                    await github.rest.actions.createRepoVariable({
+                      owner: context.repo.owner,
+                      repo: finalName,
+                      name: variable,
+                      value: vars[variable]
+                    });
+                  }
+
+                  console.log("Org variables copied successfully.");
+                }
+
 
                 core.setOutput("status", "SUCCESS");
                 core.setOutput("repo_url", repo.data.html_url);
-                core.setOutput("message", "Repository created successfully with topics applied and metadata variables.");
+                core.setOutput("message", "Repository created successfully with topics and metadata variables applied.");
 
               } catch (err) {
                 console.error("Failed to set repo variables:", err.message);
