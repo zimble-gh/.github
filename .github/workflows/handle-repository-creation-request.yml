@@ -17,21 +17,31 @@ jobs:
     runs-on: ubuntu-latest
 
     outputs:
-      validate_status:   ${{ steps.validate.outputs.status }}
-      duplicate_status:  ${{ steps.duplicate.outputs.status }}
-      duplicate_message: ${{ steps.duplicate.outputs.message }}
-      create_status:     ${{ steps.create.outputs.status }}
-      topics_status:     ${{ steps.topics.outputs.status }}
-      topics_message:    ${{ steps.topics.outputs.message }}
-      metadata_status:   ${{ steps.metadata.outputs.status }}
-      metadata_message:  ${{ steps.metadata.outputs.message }}
-      orgvars_status:    ${{ steps.orgvars.outputs.status }}
-      orgvars_message:   ${{ steps.orgvars.outputs.message }}
-      orgvars_info:      ${{ steps.orgvars.outputs.info }}
+      validate_status:  ${{ steps.validate.outputs.status }}
+      validate_success: ${{ steps.validate.outputs.success }}
+      validate_error:   ${{ steps.validate.outputs.error }}
+      validate_warning: ${{ steps.validate.outputs.warning }}
+      validate_info:    ${{ steps.validate.outputs.info }}
 
-      message:   ${{ steps.create.outputs.message || steps.validate.outputs.message }}
-      repo_url:  ${{ steps.create.outputs.repo_url }}
-      warnings:  ${{ steps.validate.outputs.warnings }}
+      duplicate_status: ${{ steps.duplicate.outputs.status }}
+      duplicate_error:  ${{ steps.duplicate.outputs.error }}
+
+      create_status:   ${{ steps.create.outputs.status }}
+      create_success:  ${{ steps.create.outputs.success }}
+      create_error:    ${{ steps.create.outputs.error }}
+
+      topics_status:   ${{ steps.topics.outputs.status }}
+      topics_success:  ${{ steps.topics.outputs.success }}
+      topics_error:    ${{ steps.topics.outputs.error }}
+
+      metadata_status:  ${{ steps.metadata.outputs.status }}
+      metadata_success: ${{ steps.metadata.outputs.success }}
+      metadata_error:   ${{ steps.metadata.outputs.error }}
+
+      orgvars_status:  ${{ steps.orgvars.outputs.status }}
+      orgvars_success: ${{ steps.orgvars.outputs.success }}
+      orgvars_error:   ${{ steps.orgvars.outputs.error }}
+      orgvars_info:    ${{ steps.orgvars.outputs.info }}
 
     steps:
 
@@ -60,9 +70,6 @@ jobs:
             let errors = [];
             let warnings = [];
 
-            // =========================
-            // Extract
-            // =========================
             const product        = extract("Product Line");
             const aspect         = extract("Aspect / Domain");
             const name           = extract("Repository Name");
@@ -70,62 +77,39 @@ jobs:
             const descriptionRaw = extract("Repository Description \\(Max\\. 350 characters\\)");
             const visibilityRaw  = extract("Repository Visibility");
             const repoOptions    = extract("Repository Options \\(Optional\\)");
-            let   tenant         = extract("Tenant Name \\(Optional\\)");
+            let tenant           = extract("Tenant Name \\(Optional\\)");
 
-            // =========================
-            // Normalize tenant
-            // =========================
             if (!tenant || tenant === "_No response_" || tenant === "None") {
               tenant = null;
             }
 
-            // =========================
-            // Required field validation
-            // =========================
-            if (!product)        errors.push("Missing: Product Line");
-            if (!aspect)         errors.push("Missing: Aspect / Domain");
-            if (!name)           errors.push("Missing: Repository Name");
-            if (!projectType)    errors.push("Missing: Project Type");
+            if (!product) errors.push("Missing: Product Line");
+            if (!aspect) errors.push("Missing: Aspect / Domain");
+            if (!name) errors.push("Missing: Repository Name");
+            if (!projectType) errors.push("Missing: Project Type");
             if (!descriptionRaw) errors.push("Missing: Repository Description");
 
-            // =========================
-            // Name validation
-            // =========================
             if (name && !/^[a-z0-9-]+$/.test(name)) {
-              errors.push("Repository name must be kebab-case (lowercase, numbers, hyphens only).");
+              errors.push("Repository name must be kebab-case.");
             }
 
-            // =========================
-            // Visibility
-            // =========================
             let visibility;
 
-            if (visibilityRaw?.includes("Private")) {
-              visibility = "private";
-            } else if (visibilityRaw?.includes("Public")) {
-              visibility = "public";
-            } else if (visibilityRaw?.includes("Internal")) {
-              visibility = "internal";
-            } else {
-              errors.push("Invalid visibility option selected.");
-            }
+            if (visibilityRaw?.includes("Private")) visibility = "private";
+            else if (visibilityRaw?.includes("Public")) visibility = "public";
+            else if (visibilityRaw?.includes("Internal")) visibility = "internal";
+            else errors.push("Invalid visibility option.");
 
-            // =========================
-            // Auto Init
-            // =========================
             let autoInit = false;
 
             if (repoOptions) {
               if (repoOptions.includes("- [x] Initialize repository with README")) {
                 autoInit = true;
               } else if (repoOptions !== "_No response_") {
-                errors.push("Invalid repository options selection.");
+                errors.push("Invalid repository option.");
               }
             }
 
-            // =========================
-            // Compute final repo name
-            // =========================
             let finalName = null;
 
             if (product && aspect && name) {
@@ -134,24 +118,10 @@ jobs:
                 : `${product}-${aspect}-${name}`;
 
               if (finalName.length > 100) {
-                errors.push(
-                  `❌ Repository name exceeds allowed length.
-
-            Allowed max length: 100 characters  
-            Computed final repository name:
-            ${finalName}
-
-            Computed length: ${finalName.length}
-
-            👉 Naming format:
-            <product>-<aspect>-<name>[-<tenant>]`
-                );
+                errors.push(`Repo name too long (${finalName.length}/100):\n${finalName}`);
               }
             }
 
-            // =========================
-            // Topics
-            // =========================
             function sanitize(v) {
               return v.toLowerCase().replace(/[^a-z0-9-]/g, "-");
             }
@@ -170,30 +140,15 @@ jobs:
               if (tenant) topics.push(`tenant-${sanitize(tenant)}`);
 
               const longTopics = topics.filter(t => t.length > 50);
-
               if (longTopics.length > 0) {
-                errors.push(
-                  `❌ Some repository topics exceed 50 characters:
-
-            ${longTopics.join("\n")}
-
-            👉 Please shorten input values.`
-                );
+                errors.push(`Topics exceed 50 chars:\n${longTopics.join("\n")}`);
               }
             }
 
-            // =========================
-            // Description warning
-            // =========================
             if (descriptionRaw && descriptionRaw.length > 350) {
-              warnings.push(
-                "Description exceeds 350 characters and will be truncated."
-              );
+              warnings.push("Description will be truncated.");
             }
 
-            // =========================
-            // Metadata JSON
-            // =========================
             const metadata = {
               REPO_METADATA_PRODUCTLINE: product,
               REPO_METADATA_ASPECT: aspect,
@@ -203,30 +158,28 @@ jobs:
               REPO_METADATA_MANAGED: true
             };
 
-            // =========================
-            // FINAL DECISION
-            // =========================
             if (errors.length > 0) {
               core.setOutput("status", "PARSE_ERROR");
-              core.setOutput("message", errors.join("\n\n"));
-              core.setOutput("warnings", JSON.stringify(warnings));
+              core.setOutput("error", errors.join("\n\n"));
+              core.setOutput("warning", JSON.stringify(warnings));
+              core.setOutput("info", JSON.stringify([]));
               return;
             }
 
-            // =========================
-            // SUCCESS OUTPUTS
-            // =========================
             core.setOutput("status", "OK");
+            core.setOutput("success", "✅ Validation successful.");
+            core.setOutput("warning", JSON.stringify(warnings));
+            core.setOutput("info", JSON.stringify([]));
+
             core.setOutput("final_name", finalName);
             core.setOutput("visibility", visibility);
             core.setOutput("auto_init", autoInit);
             core.setOutput("topics", JSON.stringify(topics));
             core.setOutput("metadata", JSON.stringify(metadata));
             core.setOutput("description", descriptionRaw.substring(0, 350));
-            core.setOutput("warnings", JSON.stringify(warnings));
 
       # =========================
-      # DUPLICATE CHECK
+      # DUPLICATE
       # =========================
       - name: Check Duplicate
         id: duplicate
@@ -246,27 +199,16 @@ jobs:
               core.setOutput("status", "DUPLICATE_ERROR");
 
             } catch (e) {
-
               if (e.status === 404) {
                 core.setOutput("status", "OK");
-                return;
+              } else {
+                core.setOutput("status", "ERROR");
+                core.setOutput("error", e.message);
               }
-
-              // 🔥 REAL ERROR PROPAGATION
-              const msg = `❌ Failed to verify if repository already exists.
-
-            Repository: ${process.env.FINAL_NAME}
-
-            Error: ${e.message}
-
-            👉 Please retry or contact platform team if issue persists.`;
-
-              core.setOutput("status", "ERROR");
-              core.setOutput("message", msg);
             }
 
       # =========================
-      # CREATE REPO
+      # CREATE
       # =========================
       - name: Create Repo
         id: create
@@ -290,11 +232,11 @@ jobs:
               });
 
               core.setOutput("status", "OK");
-              core.setOutput("repo_url", repo.data.html_url);
+              core.setOutput("success", `✅ Repo created:\n${repo.data.html_url}`);
 
             } catch (e) {
               core.setOutput("status", "ERROR");
-              core.setOutput("message", e.message);
+              core.setOutput("error", e.message);
             }
 
       # =========================
@@ -312,34 +254,22 @@ jobs:
           github-token: ${{ steps.app-token.outputs.token }}
           script: |
             try {
-              const topics = JSON.parse(process.env.TOPICS);
-
               await github.rest.repos.replaceAllTopics({
                 owner: context.repo.owner,
                 repo: process.env.FINAL_NAME,
-                names: topics
+                names: JSON.parse(process.env.TOPICS)
               });
 
               core.setOutput("status", "OK");
+              core.setOutput("success", "Topics applied.");
 
             } catch (e) {
-
-              const msg = `Failed to apply repository topics.
-
-            Repository: ${process.env.FINAL_NAME}
-
-            Topics:
-            ${process.env.TOPICS}
-
-            Error:
-            ${e.message}`;
-
               core.setOutput("status", "ERROR");
-              core.setOutput("message", msg);
+              core.setOutput("error", e.message);
             }
 
       # =========================
-      # METADATA VARIABLES
+      # METADATA
       # =========================
       - name: Add Metadata Variables
         id: metadata
@@ -353,54 +283,32 @@ jobs:
           github-token: ${{ steps.app-token.outputs.token }}
           script: |
             const metadata = JSON.parse(process.env.METADATA);
-
             let failures = [];
-            let successCount = 0;
 
-            for (const [key, value] of Object.entries(metadata)) {
-              if (value === null || value === undefined) continue;
-
+            for (const [k, v] of Object.entries(metadata)) {
+              if (v == null) continue;
               try {
                 await github.rest.actions.createRepoVariable({
                   owner: context.repo.owner,
                   repo: process.env.FINAL_NAME,
-                  name: key,
-                  value: String(value)
+                  name: k,
+                  value: String(v)
                 });
-
-                successCount++;
-
               } catch (e) {
-                failures.push(
-                  `Variable: ${key}\nError: ${e.message}`
-                );
+                failures.push(`${k}: ${e.message}`);
               }
             }
 
-            // =========================
-            // Final status decision
-            // =========================
             if (failures.length === 0) {
               core.setOutput("status", "OK");
-              return;
+              core.setOutput("success", "Metadata variables set.");
+            } else {
+              core.setOutput("status", "ERROR");
+              core.setOutput("error", failures.join("\n"));
             }
 
-            const msg = `Some repository metadata variables failed to be created.
-
-            Repository: ${process.env.FINAL_NAME}
-
-            Successful: ${successCount}
-            Failed: ${failures.length}
-
-            Failure details:
-            ${failures.join("\n\n")}
-            `;
-
-            core.setOutput("status", "ERROR");
-            core.setOutput("message", msg);
-
       # =========================
-      # ORG VAR COPY
+      # ORG VARS
       # =========================
       - name: Copy Org Variables
         id: orgvars
@@ -413,98 +321,40 @@ jobs:
           github-token: ${{ steps.app-token.outputs.token }}
           script: |
             let failures = [];
-            let skipped  = [];
-            let successCount = 0;
-            let total = 0;
+            let skipped = [];
 
-            try {
-              const allVars = await github.paginate(
-                github.rest.actions.listOrgVariables,
-                {
-                  org: context.repo.owner,
-                  per_page: 100
-                }
-              );
+            const vars = await github.paginate(
+              github.rest.actions.listOrgVariables,
+              { org: context.repo.owner }
+            );
 
-              if (!allVars || allVars.length === 0) {
-                core.setOutput("status", "OK");
-                core.setOutput("info", "No organization variables found.");
-                return;
+            for (const v of vars) {
+              if (v.visibility === "selected") {
+                skipped.push(v.name);
+                continue;
               }
 
-              for (const v of allVars) {
-                total++;
-
-                // 🔥 SKIP SELECTED VISIBILITY
-                if (v.visibility === "selected") {
-                  skipped.push(v.name);
-                  continue;
-                }
-
-                try {
-                  await github.rest.actions.createRepoVariable({
-                    owner: context.repo.owner,
-                    repo: process.env.FINAL_NAME,
-                    name: v.name,
-                    value: v.value
-                  });
-
-                  successCount++;
-
-                } catch (e) {
-                  failures.push(
-                    `Variable: ${v.name}\nError: ${e.message}`
-                  );
-                }
+              try {
+                await github.rest.actions.createRepoVariable({
+                  owner: context.repo.owner,
+                  repo: process.env.FINAL_NAME,
+                  name: v.name,
+                  value: v.value
+                });
+              } catch (e) {
+                failures.push(`${v.name}: ${e.message}`);
               }
-
-            } catch (e) {
-              core.setOutput("status", "ERROR");
-              core.setOutput(
-                "message",
-                `❌ Failed to fetch organization variables.
-
-            Error: ${e.message}`
-              );
-              return;
             }
 
-            // =========================
-            // Build INFO message
-            // =========================
-            let infoMsg = "";
+            core.setOutput("info", JSON.stringify(skipped));
 
-            if (skipped.length > 0) {
-              infoMsg = `ℹ️ Skipped organization variables with restricted visibility ("selected"):
-
-            ${skipped.join("\n")}`;
-            }
-
-            core.setOutput("info", infoMsg);
-
-            // =========================
-            // Final status
-            // =========================
             if (failures.length === 0) {
               core.setOutput("status", "OK");
-              return;
+              core.setOutput("success", "Org variables copied.");
+            } else {
+              core.setOutput("status", "ERROR");
+              core.setOutput("error", failures.join("\n"));
             }
-
-            const msg = `Some organization variables failed to copy.
-
-            Repository: ${process.env.FINAL_NAME}
-
-            Total Variables: ${total}
-            Successfully Copied: ${successCount}
-            Skipped (restricted): ${skipped.length}
-            Failed: ${failures.length}
-
-            Failure details:
-            ${failures.join("\n\n")}
-            `;
-
-            core.setOutput("status", "ERROR");
-            core.setOutput("message", msg);
 
   # =========================
   # FINALIZE
@@ -518,70 +368,34 @@ jobs:
       - name: Comment & Close
         uses: actions/github-script@v9
         env:
-          VALIDATE_STATUS:   ${{ needs.process.outputs.validate_status }}
-          DUPLICATE_STATUS:  ${{ needs.process.outputs.duplicate_status }}
-          DUPLICATE_MESSAGE: ${{ needs.process.outputs.duplicate_message }}
-          CREATE_STATUS:     ${{ needs.process.outputs.create_status }}
-          TOPICS_STATUS:     ${{ needs.process.outputs.topics_status }}
-          TOPICS_MESSAGE:    ${{ needs.process.outputs.topics_message }}
-          METADATA_STATUS:   ${{ needs.process.outputs.metadata_status }}
-          METADATA_MESSAGE:  ${{ needs.process.outputs.metadata_message }}
-          ORGVARS_STATUS:    ${{ needs.process.outputs.orgvars_status }}
-          ORGVARS_MESSAGE:   ${{ needs.process.outputs.orgvars_message }}
-          ORGVARS_INFO:      ${{ needs.process.outputs.orgvars_info }}
-          MESSAGE:           ${{ needs.process.outputs.message }}
-          URL:               ${{ needs.process.outputs.repo_url }}
-          WARNINGS:          ${{ needs.process.outputs.warnings }}
+          DATA: ${{ toJson(needs.process.outputs) }}
         with:
           script: |
-            const s = process.env;
-            const warnings = JSON.parse(s.WARNINGS || "[]");
-            let info = [];
+            const d = JSON.parse(process.env.DATA);
 
-            let body = "";
+            let sections = [];
 
-            if (s.VALIDATE_STATUS === "PARSE_ERROR") {
-              body = `❌ ${s.MESSAGE}`;
-            } else if (s.DUPLICATE_STATUS === "DUPLICATE_ERROR") {
-              body = `❌ Repository already exists.\n\nPlease edit and retry.`;
-            } else if (s.DUPLICATE_STATUS === "ERROR") {
-              body = s.DUPLICATE_MESSAGE || "❌ Duplicate check failed.";
-            } else if (s.CREATE_STATUS === "ERROR") {
-              body = `❌ Repo creation failed: ${s.MESSAGE}`;
-            } else if (s.CREATE_STATUS === "OK") {
+            function add(title, msg) {
+              if (msg) sections.push(`### ${title}\n${msg}`);
+            }
 
-              if (s.TOPICS_STATUS === "ERROR") {
-                warnings.push(`⚠️ Topics step failed:\n${s.TOPICS_MESSAGE}`);
-              }
+            if (d.validate_error) add("❌ Validation", d.validate_error);
+            if (d.duplicate_error) add("❌ Duplicate Check", d.duplicate_error);
+            if (d.create_error) add("❌ Creation", d.create_error);
 
-              if (s.METADATA_STATUS === "ERROR") {
-                warnings.push(`⚠️ Metadata variables step failed:\n${s.METADATA_MESSAGE}`);
-              }
+            if (d.create_success) add("✅ Creation", d.create_success);
+            if (d.topics_error) add("⚠️ Topics", d.topics_error);
+            if (d.metadata_error) add("⚠️ Metadata", d.metadata_error);
+            if (d.orgvars_error) add("⚠️ Org Vars", d.orgvars_error);
 
-              if (s.ORGVARS_STATUS === "ERROR") {
-                warnings.push(`⚠️ Organization variables copy failed:\n${s.ORGVARS_MESSAGE}`);
-              }
-
-              if (s.ORGVARS_INFO) {
-                info.push(s.ORGVARS_INFO);
-              }
-
-              if (warnings.length === 0) {
-                body = `✅ Repository created successfully\n\n🔗 ${s.URL}`;
-              } else {
-                body = `⚠️ Repository created with additional details:\n\n`;
-
-                if (warnings.length > 0) {
-                  body += `⚠️ Warnings:\n${warnings.join("\n\n")}\n\n`;
-                }
-
-                if (info.length > 0) {
-                  body += `ℹ️ Info:\n${info.join("\n\n")}\n\n`;
-                }
-
-                body += `🔗 ${s.URL}`;
+            if (d.orgvars_info) {
+              const skipped = JSON.parse(d.orgvars_info || "[]");
+              if (skipped.length > 0) {
+                add("ℹ️ Skipped Org Vars", skipped.join("\n"));
               }
             }
+
+            const body = sections.join("\n\n");
 
             await github.rest.issues.createComment({
               owner: context.repo.owner,
@@ -590,10 +404,7 @@ jobs:
               body
             });
 
-            if (
-              s.CREATE_STATUS === "OK" ||
-              s.DUPLICATE_STATUS === "DUPLICATE_ERROR"
-            ) {
+            if (d.create_status === "OK" || d.duplicate_status === "DUPLICATE_ERROR") {
               await github.rest.issues.update({
                 owner: context.repo.owner,
                 repo: context.repo.repo,
