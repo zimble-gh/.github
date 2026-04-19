@@ -24,6 +24,7 @@ jobs:
       topics_status:     ${{ steps.topics.outputs.status }}
       topics_message:    ${{ steps.topics.outputs.message }}
       metadata_status:   ${{ steps.metadata.outputs.status }}
+      metadata_message:  ${{ steps.metadata.outputs.message }}
       orgvars_status:    ${{ steps.orgvars.outputs.status }}
 
       message:   ${{ steps.create.outputs.message || steps.validate.outputs.message }}
@@ -349,23 +350,52 @@ jobs:
         with:
           github-token: ${{ steps.app-token.outputs.token }}
           script: |
-            try {
-              const metadata = JSON.parse(process.env.METADATA);
-              for (const [k, v] of Object.entries(metadata)) {
-                if (v !== null) {
-                  await github.rest.actions.createRepoVariable({
-                    owner: context.repo.owner,
-                    repo: process.env.FINAL_NAME,
-                    name: k,
-                    value: String(v)
-                  });
-                }
+            const metadata = JSON.parse(process.env.METADATA);
+
+            let failures = [];
+            let successCount = 0;
+
+            for (const [key, value] of Object.entries(metadata)) {
+              if (value === null || value === undefined) continue;
+
+              try {
+                await github.rest.actions.createRepoVariable({
+                  owner: context.repo.owner,
+                  repo: process.env.FINAL_NAME,
+                  name: key,
+                  value: String(value)
+                });
+
+                successCount++;
+
+              } catch (e) {
+                failures.push(
+                  `Variable: ${key}\nError: ${e.message}`
+                );
               }
-              core.setOutput("status", "OK");
-            } catch (e) {
-              core.setOutput("status", "ERROR");
-              core.setOutput("message", e.message);
             }
+
+            // =========================
+            // Final status decision
+            // =========================
+            if (failures.length === 0) {
+              core.setOutput("status", "OK");
+              return;
+            }
+
+            const msg = `Some repository metadata variables failed to be created.
+
+            Repository: ${process.env.FINAL_NAME}
+
+            Successful: ${successCount}
+            Failed: ${failures.length}
+
+            Failure details:
+            ${failures.join("\n\n")}
+            `;
+
+            core.setOutput("status", "ERROR");
+            core.setOutput("message", msg);
 
       # =========================
       # ORG VAR COPY
@@ -420,6 +450,7 @@ jobs:
           TOPICS_STATUS:     ${{ needs.process.outputs.topics_status }}
           TOPICS_MESSAGE:    ${{ needs.process.outputs.topics_message }}
           METADATA_STATUS:   ${{ needs.process.outputs.metadata_status }}
+          METADATA_MESSAGE:  ${{ needs.process.outputs.metadata_message }}
           ORGVARS_STATUS:    ${{ needs.process.outputs.orgvars_status }}
           MESSAGE:           ${{ needs.process.outputs.message }}
           URL:               ${{ needs.process.outputs.repo_url }}
@@ -445,8 +476,9 @@ jobs:
                 warnings.push(`⚠️ Topics step failed:\n${s.TOPICS_MESSAGE}`);
               }
 
-              if (s.METADATA_STATUS === "ERROR")
-                warnings.push("Failed to set metadata variables");
+              if (s.METADATA_STATUS === "ERROR") {
+                warnings.push(`⚠️ Metadata variables step failed:\n${s.METADATA_MESSAGE}`);
+              }
 
               if (s.ORGVARS_STATUS === "ERROR")
                 warnings.push("Failed to copy org variables");
