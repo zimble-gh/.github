@@ -167,9 +167,15 @@ jobs:
               });
               const data = await res.json();
               if (!res.ok) {
-                throw new Error(
-                  `GitLab API error [${method} ${path}] -> ${JSON.stringify(data)}`
-                );
+                let errorMessage = `GitLab API error [${method} ${path}] -> ${res.status} ${res.statusText}`;
+                if (res.status === 404) {
+                  errorMessage += `\nThis may indicate insufficient permissions for the GITLAB_API_TOKEN or that the resource does not exist.`;
+                } else if (res.status === 401 || res.status === 403) {
+                  errorMessage += `\nThis likely indicates an issue with the GITLAB_API_TOKEN permissions.`;
+                } else {
+                  errorMessage += `\nResponse: ${JSON.stringify(data)}`;
+                }
+                throw new Error(errorMessage);
               }
               return data;
             }
