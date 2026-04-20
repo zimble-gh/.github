@@ -85,11 +85,10 @@ jobs:
           MANAGED:      ${{ vars.REPO_METADATA_MANAGED }}
         with:
           script: |
-
             console.log("\nValidating repository metadata...");
 
             if (!process.env.MANAGED || process.env.MANAGED.toLowerCase() !== "true") {
-              core.setFailed("❌ Repository is not configured for GitLab sync (REPO_METADATA_MANAGED != true)");
+              core.setFailed("\n❌ Repository is not configured for GitLab sync (REPO_METADATA_MANAGED != true)");
               return;
             }
 
@@ -107,7 +106,7 @@ jobs:
 
             if (missing.length > 0) {
               core.setFailed(
-                `❌ Missing required metadata:\n${missing.map(m => "- REPO_METADATA_" + m).join("\n")}`
+                `\n❌ Missing required metadata:\n${missing.map(m => "- REPO_METADATA_" + m).join("\n")}`
               );
               return;
             }
@@ -147,7 +146,6 @@ jobs:
           TENANT:                    ${{ steps.validate_repository_metadata.outputs.tenant }}
         with:
           script: |
-
             const GITLAB_HOST               = process.env.GITLAB_HOST;
             const GITLAB_API_TOKEN          = process.env.GITLAB_API_TOKEN;
             const GITLAB_TOP_LEVEL_GROUP_ID = process.env.GITLAB_TOP_LEVEL_GROUP_ID;
@@ -199,7 +197,7 @@ jobs:
             }
 
             // ─────────────────────────────────────────────
-            // 3. Build GitLab group hierarchy
+            // Build GitLab group hierarchy
             // ─────────────────────────────────────────────
             //
             // Without tenant:                  With tenant:
@@ -208,7 +206,6 @@ jobs:
             //       └── product                      └── product
             //           └── aspect                       └── aspect
             //               └── repo                         └── repo
-
 
             console.log("");
             console.log("ℹ️ Resolving GitLab group hierarchy...");
@@ -290,7 +287,6 @@ jobs:
           GITLAB_API_TOKEN: ${{ secrets.GITLAB_API_TOKEN || vars.GITLAB_API_TOKEN }}
           PROJECT_PATH:     ${{ steps.ensure_gitlab_project_exists.outputs.project_path }}
         run: |
-
           set -euo pipefail
 
           echo ""
