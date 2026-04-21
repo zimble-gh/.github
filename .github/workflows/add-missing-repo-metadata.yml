@@ -296,8 +296,8 @@ jobs:
         env:
           ORG: ${{ github.repository_owner }}
           GH_TOKEN: ${{ steps.generate_github_app_token.outputs.token }}
-          GITLAB_API_TOKEN: ${{ secrets.GITLAB_API_TOKEN }}
-          GH_APP_PRIVATE_KEY: ${{ secrets.GH_APP_PRIVATE_KEY }}
+          GITLAB_API_TOKEN: ${{ secrets.GITLAB_API_TOKEN || vars.GITLAB_API_TOKEN }}
+          GH_APP_PRIVATE_KEY: ${{ secrets.GH_APP_PRIVATE_KEY || vars.GH_APP_PRIVATE_KEY }}
         with:
           github-token: ${{ steps.generate_github_app_token.outputs.token }}
           script: |
