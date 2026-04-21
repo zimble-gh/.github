@@ -31,6 +31,7 @@ on:
         required: false
         type: choice
         options:
+        - None
         - 7eleven
         - mercadia
         - petro
@@ -129,10 +130,10 @@ jobs:
 
                 remaining = remaining.substring(aspect.length + 1);
 
-                if (tenant && !remaining.endsWith(`-${tenant}`)) continue;
+                if (tenant && tenant !== "None" && !remaining.endsWith(`-${tenant}`)) continue;
 
                 let repoBase = remaining;
-                if (tenant) {
+                if (tenant && tenant !== "None") {
                   repoBase = remaining.slice(0, -(tenant.length + 1));
                 }
 
@@ -190,7 +191,7 @@ jobs:
               `type-${process.env.PROJECT_TYPE}`,
               `managed-by-platform`
             ];
-            if (tenant) topics.push(`tenant-${tenant}`);
+            if (tenant && tenant !== "None") topics.push(`tenant-${tenant}`);
 
             core.info("\n📌 Topics:");
             topics.forEach(t => core.info(`  - ${t}`));
@@ -200,7 +201,7 @@ jobs:
             core.info(`REPO_METADATA_ASPECT       = ${process.env.ASPECT}`);
             core.info(`REPO_METADATA_MANAGED      = true`);
             core.info(`REPO_METADATA_TYPE         = quarkus-maven-native-app`);
-            if (tenant) core.info(`REPO_METADATA_TENANT       = ${tenant}`);
+            if (tenant && tenant !== "None") core.info(`REPO_METADATA_TENANT       = ${tenant}`);
 
             const orgVars = JSON.parse(process.env.ORG_VARS || "[]");
 
@@ -284,7 +285,7 @@ jobs:
               `type-${process.env.PROJECT_TYPE}`,
               `managed-by-platform`
             ];
-            if (tenant) topics.push(`tenant-${tenant}`);
+            if (tenant && tenant !== "None") topics.push(`tenant-${tenant}`);
 
             for (const item of batch) {
               try {
@@ -361,7 +362,7 @@ jobs:
                   REPO_METADATA_TYPE: process.env.PROJECT_TYPE
                 };
 
-                if (tenant) {
+                if (tenant && tenant !== "None") {
                   targetVars.REPO_METADATA_TENANT = tenant;
                 }
 
