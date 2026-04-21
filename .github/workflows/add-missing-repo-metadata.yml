@@ -298,9 +298,41 @@ jobs:
             const tenant = process.env.TENANT;
 
             for (const item of batch) {
-              try {
 
-                const variables = {
+              const repo = item.repo;
+
+              try {
+                core.info(`\nℹ️ Processing metadata for ${repo}`);
+
+                // ---------------------------------------
+                // STEP 1: FETCH EXISTING VARIABLES
+                // ---------------------------------------
+                let existingVars = {};
+
+                try {
+                  const response = await github.request(
+                    "GET /repos/{owner}/{repo}/actions/variables",
+                    {
+                      owner: process.env.ORG,
+                      repo: repo
+                    }
+                  );
+
+                  for (const v of response.data.variables) {
+                    existingVars[v.name] = v.value;
+                  }
+
+                  core.info(`ℹ️ Existing variables fetched: ${Object.keys(existingVars).length}`);
+
+                } catch (err) {
+                  core.warning(`⚠️ Failed to fetch variables for ${repo}: ${err.message}`);
+                  continue; // Skip to next repo if we can't fetch variables
+                }
+
+                // ---------------------------------------
+                // STEP 2: PREPARE TARGET VARIABLES
+                // ---------------------------------------
+                const targetVars = {
                   REPO_METADATA_PRODUCT_LINE: process.env.PRODUCT_LINE,
                   REPO_METADATA_ASPECT: process.env.ASPECT,
                   REPO_METADATA_NAME: item.repoBase,
@@ -308,24 +340,65 @@ jobs:
                   REPO_METADATA_TYPE: process.env.PROJECT_TYPE
                 };
 
-                if (tenant) variables.REPO_METADATA_TENANT = tenant;
-
-                for (const [key, value] of Object.entries(variables)) {
-                  await github.request(
-                    "PUT /repos/{owner}/{repo}/actions/variables/{name}",
-                    {
-                      owner: process.env.ORG,
-                      repo: item.repo,
-                      name: key,
-                      value: value
-                    }
-                  );
+                if (tenant) {
+                  targetVars.REPO_METADATA_TENANT = tenant;
                 }
 
-                core.info(`✅ Metadata updated: ${item.repo}`);
+                // ---------------------------------------
+                // STEP 3: UPSERT LOGIC
+                // ---------------------------------------
+                for (const [key, value] of Object.entries(targetVars)) {
+
+                  try {
+
+                    if (!(key in existingVars)) {
+                      // -------------------------
+                      // CREATE (POST)
+                      // -------------------------
+                      await github.request(
+                        "POST /repos/{owner}/{repo}/actions/variables",
+                        {
+                          owner: process.env.ORG,
+                          repo: repo,
+                          name: key,
+                          value: value
+                        }
+                      );
+
+                      core.info(`🆕 Created variable: ${key}`);
+
+                    } else if (existingVars[key] !== value) {
+                      // -------------------------
+                      // UPDATE (PUT)
+                      // -------------------------
+                      await github.request(
+                        "PATCH /repos/{owner}/{repo}/actions/variables/{name}",
+                        {
+                          owner: process.env.ORG,
+                          repo: repo,
+                          name: key,
+                          value: value
+                        }
+                      );
+
+                      core.info(`🔄 Updated variable: ${key}`);
+
+                    } else {
+                      // -------------------------
+                      // NO CHANGE
+                      // -------------------------
+                      core.info(`⏭️ No change: ${key}`);
+                    }
+
+                  } catch (err) {
+                    core.warning(`⚠️ Variable ${key} failed for ${repo}: ${err.message}`);
+                  }
+                }
+
+                core.info(`✅ Metadata upsert completed: ${repo}`);
 
               } catch (err) {
-                core.error(`❌ Metadata failed: ${item.repo} -> ${err.message}`);
+                core.error(`❌ Metadata processing failed for ${repo}: ${err.message}`);
               }
             }
 
