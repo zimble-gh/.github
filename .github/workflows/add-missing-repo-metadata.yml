@@ -141,8 +141,28 @@ jobs:
           private-key: ${{ secrets.GH_APP_PRIVATE_KEY || vars.GH_APP_PRIVATE_KEY }}
           owner: ${{ github.repository_owner }}
 
-      - name: Install GH CLI
-        run: sudo apt-get install gh -y
+      - name: Ensure GH CLI is installed
+        id: ensure_gh
+        run: |
+          set -e
+
+          if command -v gh >/dev/null 2>&1; then
+            echo "gh already installed"
+            gh --version
+            echo "installed=true" >> $GITHUB_OUTPUT
+          else
+            echo "gh not found. Installing..."
+
+            if sudo apt-get update && sudo apt-get install -y gh; then
+              echo "gh installed successfully"
+              gh --version
+              echo "installed=true" >> $GITHUB_OUTPUT
+            else
+              echo "❌ Failed to install gh CLI"
+              echo "installed=false" >> $GITHUB_OUTPUT
+              exit 1
+            fi
+          fi
 
       - name: Process Batch
         uses: actions/github-script@v7
