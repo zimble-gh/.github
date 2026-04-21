@@ -68,7 +68,15 @@ jobs:
 
             for (const repo of repos) {
               try {
-                if (repo.name === ".github") continue;
+              // ---- STRICT SKIP ----
+              if (
+                repo.name === ".github" ||
+                repo.full_name.endsWith("/.github")
+              ) {
+                core.info(`Skipping special repo: ${repo.full_name}`);
+                continue;
+              }
+              if (repo.name === ".github") continue;
 
                 if (!repo.name.startsWith(`${productLine}-`)) continue;
 
