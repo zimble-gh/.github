@@ -181,7 +181,6 @@ jobs:
           script: |
             
             const core = require('@actions/core');
-            const { execSync } = require('child_process');
 
             const batch = ${{ toJson(matrix.batch) }};
             const dryRun = process.env.DRY_RUN === "true";
@@ -255,17 +254,9 @@ jobs:
                 // -------------------------
                 if (isPrivate) {
 
-                  core.info("Repo is private → syncing org variables & secrets");
+                  core.info("Repo is private → syncing org variables");
 
                   if (!dryRun) {
-
-                    // ---- Sync secrets using GH CLI ----
-                    try {
-                      execSync(`echo "${process.env.GITLAB_API_TOKEN}" | gh secret set GITLAB_API_TOKEN --repo ${process.env.ORG}/${repo}`);
-                      execSync(`echo "${process.env.GH_APP_PRIVATE_KEY}" | gh secret set GH_APP_PRIVATE_KEY --repo ${process.env.ORG}/${repo}`);
-                    } catch (e) {
-                      core.warning(`Secret sync failed: ${e.message}`);
-                    }
 
                     // ---- Org variables → Repo variables ----
                     try {
@@ -300,5 +291,43 @@ jobs:
 
               } catch (err) {
                 core.error(`❌ Failed for ${repo}: ${err.message}`);
+              }
+            }
+      - name: Sync Secrets to Repo
+        if: steps.ensure_gh.outputs.installed == 'true'
+        uses: actions/github-script@v7
+        env:
+          ORG: ${{ github.repository_owner }}
+          GH_TOKEN: ${{ steps.generate_github_app_token.outputs.token }}
+          GITLAB_API_TOKEN: ${{ secrets.GITLAB_API_TOKEN }}
+          GH_APP_PRIVATE_KEY: ${{ secrets.GH_APP_PRIVATE_KEY }}
+        with:
+          github-token: ${{ steps.generate_github_app_token.outputs.token }}
+          script: |
+
+            const core = require('@actions/core');
+            const { execSync } = require('child_process');
+
+            const batch = ${{ toJson(matrix.batch) }};
+
+            for (const item of batch) {
+              const repo = item.repo;
+              const isPrivate = item.private;
+
+              if (!isPrivate) {
+                core.info(`Skipping secret sync for public repo: ${repo}`);
+                continue;
+              }
+
+              try {
+                core.info(`🔐 Syncing secrets for ${repo}`);
+
+                execSync(`echo "${process.env.GITLAB_API_TOKEN}" | gh secret set GITLAB_API_TOKEN --repo ${process.env.ORG}/${repo}`);
+                execSync(`echo "${process.env.GH_APP_PRIVATE_KEY}" | gh secret set GH_APP_PRIVATE_KEY --repo ${process.env.ORG}/${repo}`);
+
+                core.info(`✅ Secrets synced for ${repo}`);
+
+              } catch (e) {
+                core.error(`❌ Secret sync failed for ${repo}: ${e.message}`);
               }
             }
