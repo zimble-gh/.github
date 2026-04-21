@@ -1,0 +1,276 @@
+name: Add Missing Repo Metadata in Bulk
+
+on:
+  workflow_dispatch:
+    inputs:
+      productLine:
+        required: true
+        type: string
+      aspect:
+        required: true
+        type: string
+      projectType:
+        required: true
+        type: string
+      tenant:
+        required: false
+        type: string
+      dryRun:
+        required: true
+        type: boolean
+        default: true
+
+permissions:
+  contents: read
+
+jobs:
+
+  # --------------------------------------------------
+  # STEP 1: DISCOVER + FILTER REPOS
+  # --------------------------------------------------
+  discover:
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.build-matrix.outputs.matrix }}
+
+    steps:
+
+      - name: Generate GitHub App Token
+        id: generate_github_app_token
+        uses: actions/create-github-app-token@v3
+        with:
+          client-id: ${{ secrets.GH_APP_CLIENT_ID || vars.GH_APP_CLIENT_ID }}
+          private-key: ${{ secrets.GH_APP_PRIVATE_KEY || vars.GH_APP_PRIVATE_KEY }}
+          owner: ${{ github.repository_owner }}
+
+      - name: Build Repo Matrix
+        id: build-matrix
+        uses: actions/github-script@v7
+        env:
+          PRODUCT_LINE: ${{ inputs.productLine }}
+          ASPECT: ${{ inputs.aspect }}
+          TENANT: ${{ inputs.tenant }}
+        with:
+          github-token: ${{ steps.generate_github_app_token.outputs.token }}
+          script: |
+            
+            const org = context.repo.owner;
+            const productLine = process.env.PRODUCT_LINE;
+            const aspect = process.env.ASPECT;
+            const tenant = process.env.TENANT;
+
+            const repos = await github.paginate(
+              github.rest.repos.listForOrg,
+              { org, per_page: 100 }
+            );
+
+            const filtered = [];
+
+            for (const repo of repos) {
+              try {
+                if (repo.name === ".github") continue;
+
+                if (!repo.name.startsWith(`${productLine}-`)) continue;
+
+                let remaining = repo.name.substring(productLine.length + 1);
+
+                if (!remaining.startsWith(`${aspect}-`)) continue;
+
+                remaining = remaining.substring(aspect.length + 1);
+
+                let repoBase = remaining;
+                let tenantValue = null;
+
+                if (tenant) {
+                  if (!remaining.endsWith(`-${tenant}`)) continue;
+                  repoBase = remaining.slice(0, -(tenant.length + 1));
+                  tenantValue = tenant;
+                }
+
+                filtered.push({
+                  repo: repo.name,
+                  repoBase,
+                  private: repo.private,
+                  tenant: tenantValue
+                });
+
+              } catch (err) {
+                core.warning(`Error processing repo ${repo.name}: ${err.message}`);
+              }
+            }
+
+            // ---- chunk into batches (size = 5) ----
+            const batchSize = 5;
+            const matrix = [];
+
+            for (let i = 0; i < filtered.length; i += batchSize) {
+              matrix.push(filtered.slice(i, i + batchSize));
+            }
+
+            core.setOutput("matrix", JSON.stringify(matrix));
+            core.info(`Total repos matched: ${filtered.length}`);
+            core.info(`Total batches: ${matrix.length}`);
+
+  # --------------------------------------------------
+  # STEP 2: PROCESS IN PARALLEL BATCHES
+  # --------------------------------------------------
+  process:
+    needs: discover
+    runs-on: ubuntu-latest
+
+    strategy:
+      fail-fast: false
+      matrix:
+        batch: ${{ fromJson(needs.discover.outputs.matrix) }}
+
+    steps:
+
+      - name: Generate GitHub App Token
+        id: generate_github_app_token
+        uses: actions/create-github-app-token@v3
+        with:
+          client-id: ${{ secrets.GH_APP_CLIENT_ID || vars.GH_APP_CLIENT_ID }}
+          private-key: ${{ secrets.GH_APP_PRIVATE_KEY || vars.GH_APP_PRIVATE_KEY }}
+          owner: ${{ github.repository_owner }}
+
+      - name: Install GH CLI
+        run: sudo apt-get install gh -y
+
+      - name: Process Batch
+        uses: actions/github-script@v7
+        env:
+          PRODUCT_LINE: ${{ inputs.productLine }}
+          ASPECT: ${{ inputs.aspect }}
+          PROJECT_TYPE: ${{ inputs.projectType }}
+          TENANT: ${{ inputs.tenant }}
+          DRY_RUN: ${{ inputs.dryRun }}
+          ORG: ${{ github.repository_owner }}
+          GH_TOKEN: ${{ steps.generate_github_app_token.outputs.token }}
+          GITLAB_API_TOKEN: ${{ secrets.GITLAB_API_TOKEN || vars.GITLAB_API_TOKEN }}
+          GH_APP_PRIVATE_KEY: ${{ secrets.GH_APP_PRIVATE_KEY || vars.GH_APP_PRIVATE_KEY }}
+        with:
+          github-token: ${{ steps.generate_github_app_token.outputs.token }}
+          script: |
+            
+            const core = require('@actions/core');
+            const { execSync } = require('child_process');
+
+            const batch = ${{ toJson(matrix.batch) }};
+            const dryRun = process.env.DRY_RUN === "true";
+
+            for (const item of batch) {
+              const repo = item.repo;
+              const repoBase = item.repoBase;
+              const isPrivate = item.private;
+              const tenant = item.tenant;
+
+              try {
+                core.info(`\n=== Processing ${repo} ===`);
+
+                // -------------------------
+                // TOPICS
+                // -------------------------
+                const topics = [
+                  `product-${process.env.PRODUCT_LINE}`,
+                  `aspect-${process.env.ASPECT}`,
+                  `type-${process.env.PROJECT_TYPE}`,
+                  `managed-by-platform`
+                ];
+
+                if (tenant) {
+                  topics.push(`tenant-${tenant}`);
+                }
+
+                if (!dryRun) {
+                  await github.rest.repos.replaceAllTopics({
+                    owner: process.env.ORG,
+                    repo,
+                    names: topics
+                  });
+                }
+
+                // -------------------------
+                // VARIABLES
+                // -------------------------
+                const variables = {
+                  REPO_METADATA_PRODUCT_LINE: process.env.PRODUCT_LINE,
+                  REPO_METADATA_ASPECT: process.env.ASPECT,
+                  REPO_METADATA_NAME: repoBase,
+                  REPO_METADATA_MANAGED: "true",
+                  REPO_METADATA_TYPE: "quarkus-maven-native-app"
+                };
+
+                if (tenant) {
+                  variables["REPO_METADATA_TENANT"] = tenant;
+                }
+
+                for (const [key, value] of Object.entries(variables)) {
+                  try {
+                    if (!dryRun) {
+                      await github.request(
+                        "PUT /repos/{owner}/{repo}/actions/variables/{name}",
+                        {
+                          owner: process.env.ORG,
+                          repo,
+                          name: key,
+                          value
+                        }
+                      );
+                    }
+                  } catch (e) {
+                    core.warning(`Variable failed: ${key} -> ${e.message}`);
+                  }
+                }
+
+                // -------------------------
+                // PRIVATE REPO HANDLING
+                // -------------------------
+                if (isPrivate) {
+
+                  core.info("Repo is private → syncing org variables & secrets");
+
+                  if (!dryRun) {
+
+                    // ---- Sync secrets using GH CLI ----
+                    try {
+                      execSync(`echo "${process.env.GITLAB_API_TOKEN}" | gh secret set GITLAB_API_TOKEN --repo ${process.env.ORG}/${repo}`);
+                      execSync(`echo "${process.env.GH_APP_PRIVATE_KEY}" | gh secret set GH_APP_PRIVATE_KEY --repo ${process.env.ORG}/${repo}`);
+                    } catch (e) {
+                      core.warning(`Secret sync failed: ${e.message}`);
+                    }
+
+                    // ---- Org variables → Repo variables ----
+                    try {
+                      const orgVars = await github.request(
+                        "GET /orgs/{org}/actions/variables",
+                        { org: process.env.ORG }
+                      );
+
+                      for (const v of orgVars.data.variables) {
+                        try {
+                          await github.request(
+                            "PUT /repos/{owner}/{repo}/actions/variables/{name}",
+                            {
+                              owner: process.env.ORG,
+                              repo,
+                              name: v.name,
+                              value: v.value
+                            }
+                          );
+                        } catch (err) {
+                          core.warning(`Org var sync failed: ${v.name}`);
+                        }
+                      }
+
+                    } catch (e) {
+                      core.warning(`Fetching org variables failed: ${e.message}`);
+                    }
+                  }
+                }
+
+                core.info(`✅ Completed ${repo}`);
+
+              } catch (err) {
+                core.error(`❌ Failed for ${repo}: ${err.message}`);
+              }
+            }
