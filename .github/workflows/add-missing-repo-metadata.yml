@@ -5,16 +5,37 @@ on:
     inputs:
       productLine:
         required: true
-        type: string
+        type: choice
+        options:
+        - common
+        - ewallet
+        - hyperconfigurator
+        - pos-management
+        - reconciliation
+        - switching
       aspect:
         required: true
-        type: string
+        type: choice
+        options:
+        - backend
+        - frontend
+        - flutter
+        - platform
+        - testing
+        - documentation
+        
       projectType:
         required: true
         type: string
       tenant:
         required: false
-        type: string
+        type: choice
+        options:
+        - 7eleven
+        - mercadia
+        - petro
+        - telcel
+
       dryRun:
         required: true
         type: boolean
