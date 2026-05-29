@@ -74,7 +74,7 @@ body:
         - gitops
         - helm-charts
         - local-util-scripts
-        - python-pyproject
+        - python-pyproject-app
         - python-scripts
         - terraform-modules
         - terraform-scripts
