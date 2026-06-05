@@ -67,6 +67,7 @@ body:
         - flutter-windows-app
 
         - --- Frontend ---
+        - golang-windows-app
         - nextjs-webapp
 
         - --- Platform ---
