@@ -254,13 +254,103 @@ jobs:
               console.log(`\nℹ️ GitLab project path : ${project.path_with_namespace}`);
 
               core.setOutput("project_path", project.path_with_namespace);
+              core.setOutput("project_id", project.id);
             } catch (error) {
               core.setFailed(`\n❌ Failed to ensure GitLab project exists\n${error.message}`);
               core.setOutput("project_path", "");
+              core.setOutput("project_id", "");
             }
 
       # --------------------------------------------------
-      # Step 4: Generate GitHub App Token
+      # Step 4: Ensure GitLab CICD Variable GH_PROJECT_REPO
+      # --------------------------------------------------
+
+      - name: Ensure GitLab CICD Variable GH_PROJECT_REPO
+        id: ensure_gitlab_gh_project_repo_variable
+        if: ${{ steps.ensure_gitlab_project_exists.outputs.project_id != '' }}
+        uses: actions/github-script@v9
+        env:
+          GITLAB_HOST:      ${{ secrets.GITLAB_HOST || vars.GITLAB_HOST }}
+          GITLAB_API_TOKEN: ${{ secrets.GITLAB_API_TOKEN || vars.GITLAB_API_TOKEN }}
+          PROJECT_ID:       ${{ steps.ensure_gitlab_project_exists.outputs.project_id }}
+          GH_PROJECT_REPO:  ${{ github.repository }}
+        with:
+          script: |
+            const GITLAB_HOST      = process.env.GITLAB_HOST;
+            const GITLAB_API_TOKEN = process.env.GITLAB_API_TOKEN;
+            const PROJECT_ID       = process.env.PROJECT_ID;
+
+            const VARIABLE_KEY   = "GH_PROJECT_REPO";
+            const VARIABLE_VALUE = process.env.GH_PROJECT_REPO;
+
+            // GitLab CICD variable options:
+            //   environment_scope = "*"     -> all environments
+            //   masked            = false   -> visible (not masked)
+            //   protected         = false   -> not protected
+            //   raw               = false   -> expand enabled, so it is interpolable in .gitlab-ci.yml
+            const variableOptions = {
+              variable_type     : "env_var",
+              environment_scope : "*",
+              masked            : false,
+              protected         : false,
+              raw               : false,
+              description       : "GitHub source repo of the project."
+            };
+
+            async function glRequest(method, path, body) {
+              const res = await fetch(`${GITLAB_HOST}/api/v4${path}`, {
+                method,
+                headers: {
+                  "PRIVATE-TOKEN" : GITLAB_API_TOKEN,
+                  "Content-Type"  : "application/json"
+                },
+                ...(body ? { body : JSON.stringify(body) } : {})
+              });
+              const data = res.status === 204 ? null : await res.json().catch(() => null);
+              return { status : res.status, ok : res.ok, data };
+            }
+
+            console.log("");
+            console.log(`ℹ️ Ensuring GitLab CICD variable '${VARIABLE_KEY}'...`);
+            console.log("------------------------------------");
+
+            try {
+              const existing = await glRequest("GET", `/projects/${PROJECT_ID}/variables/${VARIABLE_KEY}`);
+
+              if (existing.status === 404) {
+                console.log(`  → Variable not found - creating '${VARIABLE_KEY}'`);
+                const created = await glRequest("POST", `/projects/${PROJECT_ID}/variables`, {
+                  key   : VARIABLE_KEY,
+                  value : VARIABLE_VALUE,
+                  ...variableOptions
+                });
+                if (!created.ok) {
+                  throw new Error(`Failed to create variable -> ${created.status} ${JSON.stringify(created.data)}`);
+                }
+                console.log(`  ✓ Variable created : ${VARIABLE_KEY}=${VARIABLE_VALUE}`);
+              } else if (existing.ok) {
+                if (existing.data.value === VARIABLE_VALUE) {
+                  console.log(`  ✓ Variable already up to date : ${VARIABLE_KEY}=${VARIABLE_VALUE}`);
+                } else {
+                  console.log(`  → Variable differs (current='${existing.data.value}') - updating to '${VARIABLE_VALUE}'`);
+                  const updated = await glRequest("PUT", `/projects/${PROJECT_ID}/variables/${VARIABLE_KEY}`, {
+                    value : VARIABLE_VALUE,
+                    ...variableOptions
+                  });
+                  if (!updated.ok) {
+                    throw new Error(`Failed to update variable -> ${updated.status} ${JSON.stringify(updated.data)}`);
+                  }
+                  console.log(`  ✓ Variable updated : ${VARIABLE_KEY}=${VARIABLE_VALUE}`);
+                }
+              } else {
+                throw new Error(`Unexpected response fetching variable -> ${existing.status} ${JSON.stringify(existing.data)}`);
+              }
+            } catch (error) {
+              core.setFailed(`\n❌ Failed to ensure GitLab CICD variable '${VARIABLE_KEY}'\n${error.message}`);
+            }
+
+      # --------------------------------------------------
+      # Step 5: Generate GitHub App Token
       # --------------------------------------------------
 
       - name: Generate GitHub App Token
@@ -272,7 +362,7 @@ jobs:
           owner:       ${{ github.repository_owner }}
 
       # --------------------------------------------------
-      # Step 5: Mirror Repository To GitLab
+      # Step 6: Mirror Repository To GitLab
       # --------------------------------------------------
 
       - name: Mirror Repository To GitLab
