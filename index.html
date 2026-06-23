@@ -191,6 +191,43 @@
       vertical-align: middle; margin-right: 5px;
     }
     @keyframes spin { to { transform: rotate(360deg); } }
+
+    /* Env var rows */
+    .env-row {
+      display: grid;
+      grid-template-columns: 1fr 1fr 28px;
+      gap: 5px;
+      align-items: center;
+      margin-bottom: 5px;
+    }
+    .env-row:last-child { margin-bottom: 0; }
+    .env-remove {
+      background: none;
+      border: 1px solid #30363d;
+      border-radius: 6px;
+      color: #8b949e;
+      cursor: pointer;
+      font-size: 1rem;
+      line-height: 1;
+      width: 28px; height: 28px;
+      display: flex; align-items: center; justify-content: center;
+      transition: all 0.12s;
+      flex-shrink: 0;
+    }
+    .env-remove:hover { border-color: #da3633; color: #f85149; }
+    .add-env-btn {
+      background: none;
+      border: 1px dashed #30363d;
+      border-radius: 6px;
+      color: #8b949e;
+      font-size: 0.76rem;
+      padding: 0.35rem 0.7rem;
+      cursor: pointer;
+      width: 100%;
+      margin-top: 6px;
+      transition: all 0.12s;
+    }
+    .add-env-btn:hover { border-color: #58a6ff; color: #58a6ff; }
   </style>
 </head>
 <body>
@@ -338,6 +375,15 @@
           <label for="kafkaTopic">Kafka Topic <span class="req">required</span></label>
           <input type="text" id="kafkaTopic" placeholder="ewallet-my-topic" autocomplete="off">
         </div>
+      </div>
+
+      <!-- Env Vars -->
+      <hr>
+      <div class="field" style="margin-bottom:0;">
+        <div class="chips-label" style="margin-bottom:6px;">Environment Variables</div>
+        <div id="envRows"></div>
+        <button type="button" class="add-env-btn" onclick="addEnvRow()">+ Add variable</button>
+        <div class="hint" style="margin-top:5px;">Injected as <code>env</code> into the service values.</div>
       </div>
     </div>
 
@@ -548,7 +594,29 @@
       document.getElementById("kafkaEnabled").checked = false;
       setMongo(false);
       setKafka(false);
+      document.getElementById("envRows").innerHTML = "";
     }
+  }
+
+  function addEnvRow(key, value) {
+    const row = document.createElement("div");
+    row.className = "env-row";
+    row.innerHTML =
+      `<input type="text" class="env-key" placeholder="VAR_NAME" autocomplete="off" value="${key || ""}">` +
+      `<input type="text" class="env-value" placeholder="value" autocomplete="off" value="${value || ""}">` +
+      `<button type="button" class="env-remove" aria-label="Remove" onclick="this.parentElement.remove()">&times;</button>`;
+    document.getElementById("envRows").appendChild(row);
+    row.querySelector(".env-key").focus();
+  }
+
+  function collectEnvVars() {
+    const result = {};
+    document.querySelectorAll(".env-row").forEach(row => {
+      const k = row.querySelector(".env-key").value.trim();
+      const v = row.querySelector(".env-value").value.trim();
+      if (k) result[k] = v;
+    });
+    return result;
   }
 
   function setMongo(enabled) {
@@ -621,6 +689,15 @@
     if (document.getElementById("kafkaEnabled").checked && !document.getElementById("kafkaTopic").value.trim())
       return setStatus("error", "❌ Enter the Kafka topic.");
 
+    // Validate env rows: a value without a key is an error
+    const envVars = collectEnvVars();
+    const badRow = [...document.querySelectorAll(".env-row")].some(row => {
+      const k = row.querySelector(".env-key").value.trim();
+      const v = row.querySelector(".env-value").value.trim();
+      return !k && v;
+    });
+    if (badRow) return setStatus("error", "❌ Each environment variable must have a name.");
+
     submitBtn.disabled = true;
     submitBtn.innerHTML = '<span class="spinner"></span>Deploying…';
     setStatus("info", '<span class="spinner"></span>Triggering workflow…');
@@ -647,6 +724,7 @@
             source_repo_url:     isDomainNew ? document.getElementById("gitRepoLink").value.trim() : "",
             mongo_database:      document.getElementById("mongoEnabled").checked ? document.getElementById("mongoDatabase").value : "",
             kafka_topic:         document.getElementById("kafkaEnabled").checked ? document.getElementById("kafkaTopic").value.trim() : "",
+            env_vars:            Object.keys(envVars).length ? JSON.stringify(envVars) : "",
           },
         }),
       });
