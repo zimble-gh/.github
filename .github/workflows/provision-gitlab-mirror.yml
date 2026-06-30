@@ -465,6 +465,48 @@ jobs:
               return { status : res.status, ok : res.ok, data };
             }
 
+            // GitLab's requirements for masked (and masked-and-hidden) variable values.
+            // Surfaced when a create/update is rejected for violating these rules.
+            const MASKING_RULES = [
+              "GitLab masking requirements for masked / hidden variable values:",
+              "  - must be a single line (no newlines)",
+              "  - must be at least 8 characters long",
+              "  - must not contain whitespace",
+              "  - may only use Base64 characters (A-Z a-z 0-9 + / =) plus '@', ':', '.', '~', '-'"
+            ].join("\n");
+
+            // Extract a human-readable message from a GitLab error response body. GitLab
+            // returns errors as a string ('message'/'error') or as field -> [messages]
+            // (e.g. { message: { base: ["...does not meet the masking requirements"] } }).
+            function describeGlError(data) {
+              if (!data) {
+                return "(no response body)";
+              }
+              if (typeof data.error === "string") {
+                return data.error;
+              }
+              if (typeof data.message === "string") {
+                return data.message;
+              }
+              if (data.message && typeof data.message === "object") {
+                return Object.entries(data.message)
+                  .map(([field, msgs]) => `${field}: ${Array.isArray(msgs) ? msgs.join("; ") : msgs}`)
+                  .join(" | ");
+              }
+              return JSON.stringify(data);
+            }
+
+            // Build the error thrown when a create/update fails, appending GitLab's masking
+            // rules when the rejection looks masking-related and the value was masked.
+            function glWriteError(action, response, wasMasked) {
+              const detail = describeGlError(response.data);
+              let message = `Failed to ${action} variable -> ${response.status} ${detail}`;
+              if (wasMasked && /mask/i.test(detail)) {
+                message += `\n  ℹ️ The value appears to violate GitLab's masking rules.\n${MASKING_RULES}`;
+              }
+              return message;
+            }
+
             // Collect the variables to sync, resolving the GitLab key + flags from the name.
             // Scanning both variables and secrets keeps the flags driven purely by the name.
             const toSync = [];
@@ -512,7 +554,7 @@ jobs:
                   }
                   const created = await glRequest("POST", `/projects/${PROJECT_ID}/variables`, createBody);
                   if (!created.ok) {
-                    throw new Error(`Failed to create variable -> ${created.status} ${JSON.stringify(created.data)}`);
+                    throw new Error(glWriteError("create", created, desiredMasked));
                   }
                   console.log(`  ✓ Variable created : ${glKey}=${displayValue}`);
                 } else if (existing.ok) {
@@ -545,7 +587,7 @@ jobs:
                       masked : desiredMasked
                     });
                     if (!updated.ok) {
-                      throw new Error(`Failed to update variable -> ${updated.status} ${JSON.stringify(updated.data)}`);
+                      throw new Error(glWriteError("update", updated, desiredMasked));
                     }
                     console.log(`  ✓ Variable updated : ${glKey}=${displayValue}`);
                   }
