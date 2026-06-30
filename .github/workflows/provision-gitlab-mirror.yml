@@ -350,7 +350,181 @@ jobs:
             }
 
       # --------------------------------------------------
-      # Step 5: Generate GitHub App Token
+      # Step 5: Sync GitHub Variables To GitLab CICD
+      # --------------------------------------------------
+
+      - name: Sync GitHub Variables To GitLab CICD
+        id: sync_github_variables_to_gitlab
+        if: ${{ steps.ensure_gitlab_project_exists.outputs.project_id != '' }}
+        uses: actions/github-script@v9
+        env:
+          GITLAB_HOST:      ${{ secrets.GITLAB_HOST || vars.GITLAB_HOST }}
+          GITLAB_API_TOKEN: ${{ secrets.GITLAB_API_TOKEN || vars.GITLAB_API_TOKEN }}
+          PROJECT_ID:       ${{ steps.ensure_gitlab_project_exists.outputs.project_id }}
+          ALL_GH_VARS:      ${{ toJSON(vars) }}
+          ALL_GH_SECRETS:   ${{ toJSON(secrets) }}
+        with:
+          script: |
+            const GITLAB_HOST      = process.env.GITLAB_HOST;
+            const GITLAB_API_TOKEN = process.env.GITLAB_API_TOKEN;
+            const PROJECT_ID       = process.env.PROJECT_ID;
+
+            // Variables to sync are sourced from GitHub Actions variables and secrets.
+            // Any name beginning with the 'GL_' prefix is synced. An optional flag block
+            // may follow the prefix to set boolean GitLab properties, in any order/combo:
+            //   M -> masked    P -> protected    R -> raw (expansion disabled)
+            // The 'GL_' prefix and the optional flag block are stripped before saving:
+            //   GL_<name>        -> masked=false, protected=false, raw=false
+            //   GL_M_<name>      -> masked
+            //   GL_P_<name>      -> protected
+            //   GL_R_<name>      -> raw
+            //   GL_MP_<name>     -> masked + protected   (order/duplication independent)
+            //   GL_MPR_<name>    -> masked + protected + raw   ... and every other combo
+            // A leading segment is only treated as flags when it is non-empty, contains
+            // only M/P/R, and has no duplicates; otherwise it is part of the name.
+            const PREFIX     = "GL_";
+            const FLAG_PROPS = { M : "masked", P : "protected", R : "raw" };
+
+            // Parse a GitHub key into the GitLab key + resolved flags, or null if it is
+            // not a syncable 'GL_' variable.
+            function parseGlKey(ghKey) {
+              if (!ghKey.startsWith(PREFIX)) {
+                return null;
+              }
+
+              const remainder = ghKey.slice(PREFIX.length);
+              if (!remainder) {
+                return null;
+              }
+
+              const flags = { masked : false, protected : false, raw : false };
+
+              const underscoreIdx = remainder.indexOf("_");
+              if (underscoreIdx > 0) {
+                const candidate = remainder.slice(0, underscoreIdx);
+                const name      = remainder.slice(underscoreIdx + 1);
+                const chars     = candidate.split("");
+                const allFlags  = chars.every((c) => FLAG_PROPS[c]);
+                const noDupes   = new Set(chars).size === chars.length;
+
+                if (name && allFlags && noDupes) {
+                  for (const c of chars) {
+                    flags[FLAG_PROPS[c]] = true;
+                  }
+                  return { glKey : name, ...flags };
+                }
+              }
+
+              // No valid flag block - the whole remainder is the variable name.
+              return { glKey : remainder, ...flags };
+            }
+
+            const allGhVars    = JSON.parse(process.env.ALL_GH_VARS    || "{}");
+            const allGhSecrets = JSON.parse(process.env.ALL_GH_SECRETS || "{}");
+
+            // GitLab CICD variable options common to every synced variable:
+            //   variable_type     = "env_var" -> environment variable
+            //   environment_scope = "*"       -> all environments
+            // ('masked', 'protected' and 'raw' are resolved per variable from its flags.
+            //  raw=false keeps the value interpolable in .gitlab-ci.yml.)
+            const baseVariableOptions = {
+              variable_type     : "env_var",
+              environment_scope : "*"
+            };
+
+            async function glRequest(method, path, body) {
+              const res = await fetch(`${GITLAB_HOST}/api/v4${path}`, {
+                method,
+                headers: {
+                  "PRIVATE-TOKEN" : GITLAB_API_TOKEN,
+                  "Content-Type"  : "application/json"
+                },
+                ...(body ? { body : JSON.stringify(body) } : {})
+              });
+              const data = res.status === 204 ? null : await res.json().catch(() => null);
+              return { status : res.status, ok : res.ok, data };
+            }
+
+            // Collect the variables to sync, resolving the GitLab key + flags from the name.
+            // Scanning both variables and secrets keeps the flags driven purely by the name.
+            const toSync = [];
+            for (const source of [allGhVars, allGhSecrets]) {
+              for (const [ghKey, value] of Object.entries(source)) {
+                const parsed = parseGlKey(ghKey);
+                if (parsed) {
+                  toSync.push({ ghKey, value, ...parsed });
+                }
+              }
+            }
+
+            console.log("");
+            console.log(`ℹ️ Syncing ${toSync.length} GitHub variable(s) to GitLab CICD...`);
+            console.log("------------------------------------");
+
+            if (toSync.length === 0) {
+              console.log("  ℹ️ No syncable GL_ variables found - nothing to sync");
+              return;
+            }
+
+            let failures = 0;
+
+            for (const { ghKey, glKey, value, masked, protected : isProtected, raw } of toSync) {
+              const displayValue = masked ? "***" : value;
+              const variableOptions = { ...baseVariableOptions, masked, protected : isProtected, raw };
+
+              try {
+                const existing = await glRequest("GET", `/projects/${PROJECT_ID}/variables/${glKey}`);
+
+                if (existing.status === 404) {
+                  console.log(`  → Variable not found - creating '${glKey}' (from '${ghKey}', masked=${masked}, protected=${isProtected}, raw=${raw})`);
+                  const created = await glRequest("POST", `/projects/${PROJECT_ID}/variables`, {
+                    key   : glKey,
+                    value : value,
+                    ...variableOptions
+                  });
+                  if (!created.ok) {
+                    throw new Error(`Failed to create variable -> ${created.status} ${JSON.stringify(created.data)}`);
+                  }
+                  console.log(`  ✓ Variable created : ${glKey}=${displayValue}`);
+                } else if (existing.ok) {
+                  const valueChanged     = existing.data.value !== value;
+                  const maskedChanged    = existing.data.masked !== masked;
+                  const protectedChanged = existing.data.protected !== isProtected;
+                  const rawChanged       = existing.data.raw !== raw;
+
+                  if (!valueChanged && !maskedChanged && !protectedChanged && !rawChanged) {
+                    console.log(`  ✓ Variable already up to date : ${glKey}`);
+                  } else {
+                    const reasons = [];
+                    if (valueChanged)     reasons.push("value changed");
+                    if (maskedChanged)    reasons.push(`masked ${existing.data.masked} -> ${masked}`);
+                    if (protectedChanged) reasons.push(`protected ${existing.data.protected} -> ${isProtected}`);
+                    if (rawChanged)       reasons.push(`raw ${existing.data.raw} -> ${raw}`);
+                    console.log(`  → Variable differs (${reasons.join(", ")}) - updating '${glKey}'`);
+                    const updated = await glRequest("PUT", `/projects/${PROJECT_ID}/variables/${glKey}`, {
+                      value : value,
+                      ...variableOptions
+                    });
+                    if (!updated.ok) {
+                      throw new Error(`Failed to update variable -> ${updated.status} ${JSON.stringify(updated.data)}`);
+                    }
+                    console.log(`  ✓ Variable updated : ${glKey}=${displayValue}`);
+                  }
+                } else {
+                  throw new Error(`Unexpected response fetching variable -> ${existing.status} ${JSON.stringify(existing.data)}`);
+                }
+              } catch (error) {
+                failures++;
+                console.log(`  ❌ Failed to sync '${glKey}' (from '${ghKey}')\n${error.message}`);
+              }
+            }
+
+            if (failures > 0) {
+              core.setFailed(`\n❌ Failed to sync ${failures} of ${toSync.length} GitHub variable(s) to GitLab CICD`);
+            }
+
+      # --------------------------------------------------
+      # Step 6: Generate GitHub App Token
       # --------------------------------------------------
 
       - name: Generate GitHub App Token
@@ -362,7 +536,7 @@ jobs:
           owner:       ${{ github.repository_owner }}
 
       # --------------------------------------------------
-      # Step 6: Mirror Repository To GitLab
+      # Step 7: Mirror Repository To GitLab
       # --------------------------------------------------
 
       - name: Mirror Repository To GitLab
