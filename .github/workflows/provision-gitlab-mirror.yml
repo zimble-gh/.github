@@ -481,7 +481,8 @@ jobs:
               return;
             }
 
-            let failures = 0;
+            // Track failed variables so their GitHub + GitLab names can be reported.
+            const failed = [];
 
             for (const { ghKey, glKey, value, masked, protected : isProtected, raw } of toSync) {
               const displayValue = masked ? "***" : value;
@@ -529,13 +530,18 @@ jobs:
                   throw new Error(`Unexpected response fetching variable -> ${existing.status} ${JSON.stringify(existing.data)}`);
                 }
               } catch (error) {
-                failures++;
-                console.log(`  ❌ Failed to sync '${glKey}' (from '${ghKey}')\n${error.message}`);
+                failed.push({ ghKey, glKey });
+                console.log(`  ❌ Failed to sync variable [GitHub: '${ghKey}' -> GitLab: '${glKey}']\n${error.message}`);
               }
             }
 
-            if (failures > 0) {
-              core.setFailed(`\n❌ Failed to sync ${failures} of ${toSync.length} GitHub variable(s) to GitLab CICD`);
+            if (failed.length > 0) {
+              const failedList = failed
+                .map(({ ghKey, glKey }) => `- GitHub: '${ghKey}' -> GitLab: '${glKey}'`)
+                .join("\n");
+              core.setFailed(
+                `\n❌ Failed to sync ${failed.length} of ${toSync.length} GitHub variable(s) to GitLab CICD:\n${failedList}`
+              );
             }
 
       # --------------------------------------------------
