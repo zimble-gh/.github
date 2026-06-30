@@ -386,6 +386,9 @@ jobs:
             // underscores or flag-looking segments without ambiguity, e.g.
             //   GL__MP_TOKEN     -> name 'MP_TOKEN', no flags
             //   GL_M__MP_TOKEN   -> name 'MP_TOKEN', masked
+            // An invalid flag block (unknown letters or duplicates) is tolerated: the
+            // variable is still synced with all flags defaulted to false, e.g.
+            //   GL_X__FOO        -> name 'FOO', no flags
             const PREFIX     = "GL_";
             const SEPARATOR  = "__";
             const FLAG_PROPS = { M : "masked", P : "protected", R : "raw" };
@@ -411,16 +414,17 @@ jobs:
 
               const flags = { masked : false, protected : false, raw : false };
 
-              // Empty flag block (GL__<name>) is valid and means "all flags default".
+              // Empty flag block (GL__<name>) means "all flags default". A non-empty block
+              // is applied only when valid (known M/P/R letters, no duplicates); an invalid
+              // block is tolerated and falls back to the default flag values.
               if (flagBlock.length > 0) {
                 const chars    = flagBlock.split("");
                 const allFlags = chars.every((c) => FLAG_PROPS[c]);
                 const noDupes  = new Set(chars).size === chars.length;
-                if (!allFlags || !noDupes) {
-                  return null;   // not a valid flag block -> not a syncable variable
-                }
-                for (const c of chars) {
-                  flags[FLAG_PROPS[c]] = true;
+                if (allFlags && noDupes) {
+                  for (const c of chars) {
+                    flags[FLAG_PROPS[c]] = true;
+                  }
                 }
               }
 
