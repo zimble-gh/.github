@@ -881,20 +881,32 @@ jobs:
             return 1
           }
 
-          echo "Pushing mirror..."
-          if ! push_with_retry --mirror gitlab; then
+          # Mirror BRANCHES ONLY, with a namespace-scoped prune.
+          # - Not `git push --mirror`: that pushes all of refs/* - including the
+          #   local refs/remotes/gitlab/* tracking refs git creates as a side
+          #   effect of the earlier push - which GitLab rejects ("deny updating a
+          #   hidden ref"). A scoped refspec only ever matches refs/heads/*, and
+          #   --prune stays within that namespace, so GitLab-managed refs
+          #   (refs/pipelines/*, refs/merge-requests/*, ...) are never touched.
+          # - Tags are intentionally NOT pushed: release tags originate on GitLab
+          #   (create-release-tag) and are synced GitLab -> GitHub. Pushing them
+          #   back here would reverse that direction and hit protected-tag rules.
+          fail() {
             echo ""
-            echo "❌ ERROR: Mirror push failed after multiple attempts"
+            echo "❌ ERROR: $1 failed after multiple attempts"
             echo "Possible causes:"
             echo "  - Invalid or expired GitLab token"
-            echo "  - Insufficient permissions on GitLab project"
+            echo "  - Insufficient permissions on GitLab project (or a protected ref)"
             echo "  - Network or GitLab availability issues"
             echo ""
             echo "Action Required:"
             echo "  - Verify token and permissions"
             echo "  - Retry the workflow"
             exit 1
-          fi
+          }
+
+          echo "Pushing branches..."
+          push_with_retry --prune --force gitlab "refs/heads/*:refs/heads/*" || fail "Branch mirror push"
 
           echo ""
           echo "=================================================="
