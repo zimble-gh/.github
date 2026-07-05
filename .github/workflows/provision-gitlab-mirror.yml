@@ -786,14 +786,17 @@ jobs:
 
           if [ -n "$REMOTE_SHA" ] && [ "$LOCAL_SHA" = "$REMOTE_SHA" ]; then
             echo "ℹ️ Branch '${BRANCH}' is already up to date on GitLab (${LOCAL_SHA}); targeted push would be a no-op - NO pipeline will be created, nothing will build."
-            skip_summary "ℹ️ **No build triggered** — branch \`${BRANCH}\` is already up to date on GitLab (commit \`${LOCAL_SHA:0:8}\`). There are no new commits to push, so GitLab created no pipeline and nothing was built by this run."
+            skip_summary "ℹ️ **No build triggered** — branch \`${BRANCH}\` is already up to date on GitLab (commit \`${LOCAL_SHA:0:8}\`). There are no new commits to push, so no new pipeline was created and nothing was built by this run."
             add_summary ""
-            add_summary "To build this commit, either push a new commit to the branch, or run the pipeline manually in GitLab (**CI/CD → Pipelines → Run pipeline** on \`${BRANCH}\`) with variable \`AUTO_BUILD=true\`."
+            add_summary "To build this commit, do one of the following in GitLab (**CI/CD → Pipelines**):"
+            add_summary ""
+            add_summary "- **Re-run** the build job in the pipeline that may already exist for this commit, or"
+            add_summary "- **Create a new pipeline** for \`${BRANCH}\` and start the build job manually from the pipeline screen."
             exit 0
           fi
 
           echo ""
-          echo "Auto-build enabled - targeted push of branch '${BRANCH}' with AUTO_BUILD=true..."
+          echo "Auto-build enabled - pushing branch '${BRANCH}' to trigger its build pipeline..."
           if ! push_with_retry -o ci.variable="AUTO_BUILD=true" gitlab \
                "refs/heads/${BRANCH}:refs/heads/${BRANCH}"; then
             echo "❌ ERROR: Targeted auto-build push failed after multiple attempts"
