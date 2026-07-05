@@ -746,15 +746,7 @@ jobs:
 
           BRANCH="${GITHUB_REF_NAME}"
 
-          # Auto-build applies to branches only (tags already auto-build via their
-          # own GitLab rule).
-          if [ "${GITHUB_REF_TYPE}" != "branch" ]; then
-            echo "ℹ️ Dispatched on a ${GITHUB_REF_TYPE} ('${BRANCH}'), not a branch - skipping auto-build."
-            [ -n "${GITHUB_STEP_SUMMARY:-}" ] && \
-              printf 'ℹ️ **Auto-build skipped** — dispatched on a %s (`%s`), not a branch.\n' "${GITHUB_REF_TYPE}" "$BRANCH" >> "$GITHUB_STEP_SUMMARY" || true
-            exit 0
-          fi
-
+          # Retry a git push up to 5 times. Usage: push_with_retry <push args...>
           push_with_retry() {
             for i in {1..5}; do
               echo "Attempt $i of 5..."
@@ -774,18 +766,52 @@ jobs:
             add_summary "$1"
           }
 
-          # ------------------------------------------------------------------
-          # No-op guard: if GitLab already has this branch at the local tip, the
-          # targeted push would be a no-op and GitLab creates NO pipeline - so
-          # nothing would build. Detect that and report it clearly, rather than
-          # implying a build was triggered. (Detect-and-message only; no forceful
-          # trigger for now.)
-          # ------------------------------------------------------------------
+          # ==================================================================
+          # PHASE 1 - Pre-push checks. A build only happens if ALL of these pass,
+          # so if any fails we report it and DO NOT push (the branch is still
+          # mirrored later by the full mirror step). Order:
+          #   1) ref is a branch   2) branch name is compliant
+          #   3) a .gitlab-ci.yml exists   4) there are new commits to push
+          # ==================================================================
+
+          # 1) Auto-build applies to branches only (tags auto-build via their own rule).
+          if [ "${GITHUB_REF_TYPE}" != "branch" ]; then
+            echo "ℹ️ Dispatched on a ${GITHUB_REF_TYPE} ('${BRANCH}'), not a branch - skipping auto-build."
+            printf -v _msg 'ℹ️ **Auto-build skipped** — dispatched on a %s (`%s`), not a branch.' "${GITHUB_REF_TYPE}" "$BRANCH"
+            add_summary "$_msg"
+            exit 0
+          fi
+
+          # 2) A pipeline is only created for compliant branch names (matching the
+          # definitions' workflow: rules), so a non-compliant branch must NOT be
+          # pushed for a build - it would never build anyway.
+          if ! printf '%s' "$BRANCH" | grep -qE '^(feature/.*|fix/.*|chore/.*|hotfix/v[0-9]+\.[0-9]+\.[0-9]+|release/v[0-9]+\.[0-9]+|main)$'; then
+            echo "::warning::Branch '${BRANCH}' is not a compliant branch name - not pushing; GitLab would not create a pipeline."
+            skip_summary "⚠️ **No build triggered** — branch \`${BRANCH}\` is not a compliant branch name, so it was not pushed for a build (GitLab would not create a pipeline for it)."
+            add_summary ""
+            add_summary "Push to a standard branch to trigger a build, for example:"
+            add_summary ""
+            add_summary "- \`main\`"
+            add_summary "- \`feature/*\`"
+            add_summary "- \`fix/*\`"
+            add_summary "- \`chore/*\`"
+            exit 0
+          fi
+
+          # 3) No .gitlab-ci.yml on the branch => no pipeline can run => nothing to build.
+          CI_FILE="$(git show "refs/heads/${BRANCH}:.gitlab-ci.yml" 2>/dev/null || true)"
+          if [ -z "$CI_FILE" ]; then
+            echo "ℹ️ No .gitlab-ci.yml on '${BRANCH}' - not pushing; no pipeline would run."
+            skip_summary "ℹ️ **No build triggered** — no \`.gitlab-ci.yml\` on branch \`${BRANCH}\`, so no pipeline can run and there is nothing to build."
+            exit 0
+          fi
+
+          # 4) No new commits => the push would be a no-op and GitLab creates no
+          # pipeline, so nothing would build. (Detect-and-message only for now.)
           LOCAL_SHA="$(git rev-parse "refs/heads/${BRANCH}")"
           REMOTE_SHA="$(git ls-remote gitlab "refs/heads/${BRANCH}" 2>/dev/null | awk 'NR==1{print $1}')"
-
           if [ -n "$REMOTE_SHA" ] && [ "$LOCAL_SHA" = "$REMOTE_SHA" ]; then
-            echo "ℹ️ Branch '${BRANCH}' is already up to date on GitLab (${LOCAL_SHA}); targeted push would be a no-op - NO pipeline will be created, nothing will build."
+            echo "ℹ️ Branch '${BRANCH}' already up to date on GitLab (${LOCAL_SHA}); not pushing - no new pipeline would be created."
             skip_summary "ℹ️ **No build triggered** — branch \`${BRANCH}\` is already up to date on GitLab (commit \`${LOCAL_SHA:0:8}\`). There are no new commits to push, so no new pipeline was created and nothing was built by this run."
             add_summary ""
             add_summary "To build this commit, do one of the following in GitLab (**CI/CD → Pipelines**):"
@@ -795,6 +821,10 @@ jobs:
             exit 0
           fi
 
+          # ==================================================================
+          # PUSH - all pre-push checks passed: push the selected branch so its
+          # pipeline is created and the build job runs automatically.
+          # ==================================================================
           echo ""
           echo "Auto-build enabled - pushing branch '${BRANCH}' to trigger its build pipeline..."
           if ! push_with_retry -o ci.variable="AUTO_BUILD=true" gitlab \
@@ -803,18 +833,11 @@ jobs:
             exit 1
           fi
 
-          # ------------------------------------------------------------------
-          # Derive & display the container image URL (container-build repos only)
-          # ------------------------------------------------------------------
-
-          # No .gitlab-ci.yml on the branch => no GitLab pipeline runs => nothing
-          # to build, so there is no image URL to show.
-          CI_FILE="$(git show "refs/heads/${BRANCH}:.gitlab-ci.yml" 2>/dev/null || true)"
-          if [ -z "$CI_FILE" ]; then
-            echo "ℹ️ No .gitlab-ci.yml on '${BRANCH}' - no pipeline will run; skipping image URL."
-            skip_summary "ℹ️ **Skipped** — no \`.gitlab-ci.yml\` on this branch, so no pipeline runs and there is nothing to build."
-            exit 0
-          fi
+          # ==================================================================
+          # PHASE 2 - Image URL (container-build repos only). The build is now
+          # running; for container definitions we derive the ahead-of-time image
+          # reference. Non-container (jar) builds simply have no image URL.
+          # ==================================================================
 
           # Which centralized definition does this repo include? Take every
           # non-comment `file: <name>.gitlab-ci.yml`, reduce to its base <name>.
@@ -835,10 +858,10 @@ jobs:
           done
 
           if [ -z "$MATCHED" ]; then
-            echo "ℹ️ '${BRANCH}' uses a non-container definition (${DEFS:-none}); skipping image URL."
+            echo "ℹ️ '${BRANCH}' uses a non-container definition (${DEFS:-none}); build triggered, no image URL."
             _ctlist=""
             for c in $CONTAINER_TYPES; do _ctlist="${_ctlist:+$_ctlist, }\`$c\`"; done
-            printf -v _msg 'ℹ️ **Skipped** — this repo uses a non-container build definition (`%s`); no container image is produced.' "${DEFS:-none}"
+            printf -v _msg 'ℹ️ **Build triggered** — this repo uses a non-container build definition (`%s`), so there is no container image URL.' "${DEFS:-none}"
             skip_summary "$_msg"
             add_summary ""
             add_summary "Container image URLs are derived only for these container-build definitions (as of now): ${_ctlist}."
@@ -846,27 +869,11 @@ jobs:
           fi
           echo "ℹ️ Container definition detected: ${MATCHED}"
 
-          # A pipeline is only created for compliant branch names (matching the
-          # definitions' workflow: rules). A non-compliant branch is mirrored but
-          # never builds, so report that instead of deriving an image URL.
-          if ! printf '%s' "$BRANCH" | grep -qE '^(feature/.*|fix/.*|chore/.*|hotfix/v[0-9]+\.[0-9]+\.[0-9]+|release/v[0-9]+\.[0-9]+|main)$'; then
-            echo "::warning::Branch '${BRANCH}' is not a compliant branch name - GitLab will not create a pipeline, so no build runs."
-            skip_summary "⚠️ **No build triggered** — branch \`${BRANCH}\` is not a compliant branch name, so GitLab does not create a pipeline for it and nothing is built."
-            add_summary ""
-            add_summary "Push to a standard branch to trigger a build, for example:"
-            add_summary ""
-            add_summary "- \`main\`"
-            add_summary "- \`feature/*\`"
-            add_summary "- \`fix/*\`"
-            add_summary "- \`chore/*\`"
-            exit 0
-          fi
-
           # pom.xml is required both to build the image and to derive its version.
           POM="$(git show "refs/heads/${BRANCH}:pom.xml" 2>/dev/null || true)"
           if [ -z "$POM" ]; then
-            echo "::warning::No pom.xml on '${BRANCH}' - the container build cannot run and the image URL cannot be derived. Skipping."
-            skip_summary "⚠️ **Skipped** — no \`pom.xml\` on this branch. The container build cannot run and the image reference cannot be derived."
+            echo "::warning::No pom.xml on '${BRANCH}' - the container build will fail and the image URL cannot be derived."
+            skip_summary "⚠️ **Build triggered, but no image URL** — no \`pom.xml\` on branch \`${BRANCH}\`. The container build will fail and the image reference cannot be derived."
             exit 0
           fi
 
@@ -881,8 +888,8 @@ jobs:
             }')"
 
           if ! printf '%s' "$VERSION" | grep -qE '^[0-9]+\.[0-9]+\.[0-9]+(-SNAPSHOT)?$'; then
-            echo "::warning::Could not parse a literal semver project.version from pom.xml (got '${VERSION:-empty}'); skipping image URL."
-            printf -v _msg '⚠️ **Skipped** — could not read a literal semver `project.version` from `pom.xml` (got `%s`).' "${VERSION:-empty}"
+            echo "::warning::Could not parse a literal semver project.version from pom.xml (got '${VERSION:-empty}'); cannot derive the image URL."
+            printf -v _msg '⚠️ **Build triggered, but no image URL** — could not read a literal semver `project.version` from `pom.xml` (got `%s`). Check the pipeline for the actual image tag.' "${VERSION:-empty}"
             skip_summary "$_msg"
             exit 0
           fi
@@ -900,8 +907,8 @@ jobs:
             | sed -n 's/.*"container_registry_image_prefix"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p')"
 
           if [ -z "$REGISTRY_IMAGE" ]; then
-            echo "::warning::Could not read container_registry_image_prefix from the GitLab API; skipping image URL."
-            skip_summary "⚠️ **Skipped** — could not read \`container_registry_image_prefix\` from the GitLab API."
+            echo "::warning::Could not read container_registry_image_prefix from the GitLab API; cannot derive the image URL."
+            skip_summary "⚠️ **Build triggered, but no image URL** — could not read \`container_registry_image_prefix\` from the GitLab API."
             exit 0
           fi
 
