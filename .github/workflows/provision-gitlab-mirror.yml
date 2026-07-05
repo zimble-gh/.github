@@ -765,6 +765,33 @@ jobs:
             return 1
           }
 
+          # Summary helpers (write to the GitHub Actions job summary, if present).
+          add_summary() { [ -n "${GITHUB_STEP_SUMMARY:-}" ] && printf '%s\n' "$1" >> "$GITHUB_STEP_SUMMARY" || true; }
+          skip_summary() {
+            printf -v _hdr '### 📦 Container image (auto-build) — `%s`' "$BRANCH"
+            add_summary "$_hdr"
+            add_summary ""
+            add_summary "$1"
+          }
+
+          # ------------------------------------------------------------------
+          # No-op guard: if GitLab already has this branch at the local tip, the
+          # targeted push would be a no-op and GitLab creates NO pipeline - so
+          # nothing would build. Detect that and report it clearly, rather than
+          # implying a build was triggered. (Detect-and-message only; no forceful
+          # trigger for now.)
+          # ------------------------------------------------------------------
+          LOCAL_SHA="$(git rev-parse "refs/heads/${BRANCH}")"
+          REMOTE_SHA="$(git ls-remote gitlab "refs/heads/${BRANCH}" 2>/dev/null | awk 'NR==1{print $1}')"
+
+          if [ -n "$REMOTE_SHA" ] && [ "$LOCAL_SHA" = "$REMOTE_SHA" ]; then
+            echo "ℹ️ Branch '${BRANCH}' is already up to date on GitLab (${LOCAL_SHA}); targeted push would be a no-op - NO pipeline will be created, nothing will build."
+            skip_summary "ℹ️ **No build triggered** — branch \`${BRANCH}\` is already up to date on GitLab (commit \`${LOCAL_SHA:0:8}\`). There are no new commits to push, so GitLab created no pipeline and nothing was built by this run."
+            add_summary ""
+            add_summary "To build this commit, either push a new commit to the branch, or run the pipeline manually in GitLab (**CI/CD → Pipelines → Run pipeline** on \`${BRANCH}\`) with variable \`AUTO_BUILD=true\`."
+            exit 0
+          fi
+
           echo ""
           echo "Auto-build enabled - targeted push of branch '${BRANCH}' with AUTO_BUILD=true..."
           if ! push_with_retry -o ci.variable="AUTO_BUILD=true" gitlab \
@@ -776,14 +803,6 @@ jobs:
           # ------------------------------------------------------------------
           # Derive & display the container image URL (container-build repos only)
           # ------------------------------------------------------------------
-          # Summary helpers (write to the GitHub Actions job summary, if present).
-          add_summary() { [ -n "${GITHUB_STEP_SUMMARY:-}" ] && printf '%s\n' "$1" >> "$GITHUB_STEP_SUMMARY" || true; }
-          skip_summary() {
-            printf -v _hdr '### 📦 Container image (auto-build) — `%s`' "$BRANCH"
-            add_summary "$_hdr"
-            add_summary ""
-            add_summary "$1"
-          }
 
           # No .gitlab-ci.yml on the branch => no GitLab pipeline runs => nothing
           # to build, so there is no image URL to show.
