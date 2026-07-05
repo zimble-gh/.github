@@ -771,9 +771,9 @@ jobs:
             add_summary "$1"
           }
 
-          # Separate this step's summary section from any earlier one with a double
-          # horizontal rule.
-          [ -n "${GITHUB_STEP_SUMMARY:-}" ] && printf '\n---\n\n---\n\n' >> "$GITHUB_STEP_SUMMARY" || true
+          # Separate this step's summary from any earlier one with a double rule,
+          # then title the section with the step name.
+          [ -n "${GITHUB_STEP_SUMMARY:-}" ] && printf '\n---\n\n---\n\n## Auto-Build Selected Branch\n\n' >> "$GITHUB_STEP_SUMMARY" || true
 
           # ==================================================================
           # PHASE 1 - Pre-push checks. A build only happens if ALL of these pass,
@@ -1078,6 +1078,7 @@ jobs:
           if [ -n "${GITHUB_STEP_SUMMARY:-}" ]; then
             {
               printf '\n---\n\n---\n\n'
+              printf '## Mirror Repository To GitLab\n\n'
               printf '### 🔁 Mirror sync summary — `%s`\n\n' "${GITHUB_REPOSITORY:-repository}"
               printf '| Operation | Source | Reason | Count |\n'
               printf '| --- | --- | --- | --: |\n'
