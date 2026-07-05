@@ -999,13 +999,21 @@ jobs:
           # Local branches (this mirror clone of GitHub).
           mapfile -t LOCAL_BRANCHES < <(git for-each-ref --format='%(refname:short)' refs/heads)
 
+          # Trackers for the job summary.
+          SYNCED=()            # compliant GitHub branches pushed to GitLab
+          SKIPPED=()           # non-compliant GitHub branches (never synced)
+          DEL_NONCOMPLIANT=()  # non-compliant branches deleted on GitLab
+          DEL_STALE=()         # compliant branches deleted on GitLab (gone from GitHub)
+
           # 1) Push only compliant branches; skip (never sync) the rest.
           push_specs=()
           for br in "${LOCAL_BRANCHES[@]}"; do
             if printf '%s' "$br" | grep -qE "$COMPLIANT_BRANCH_REGEX"; then
               push_specs+=("refs/heads/${br}:refs/heads/${br}")
+              SYNCED+=("$br")
             else
               echo "  - skip non-compliant branch (not synced): $br"
+              SKIPPED+=("$br")
             fi
           done
 
@@ -1020,11 +1028,17 @@ jobs:
           del_specs=()
           while IFS= read -r rbr; do
             [ -n "$rbr" ] || continue
-            if printf '%s' "$rbr" | grep -qE "$COMPLIANT_BRANCH_REGEX" \
-               && printf '%s\n' "${LOCAL_BRANCHES[@]}" | grep -qxF "$rbr"; then
-              continue   # compliant and still on GitHub -> keep
+            if printf '%s' "$rbr" | grep -qE "$COMPLIANT_BRANCH_REGEX"; then
+              # Compliant remote branch: keep if it still exists on GitHub, else stale.
+              if printf '%s\n' "${LOCAL_BRANCHES[@]}" | grep -qxF "$rbr"; then
+                continue
+              fi
+              echo "  - deleting GitLab branch (stale, gone from GitHub): $rbr"
+              DEL_STALE+=("$rbr")
+            else
+              echo "  - deleting GitLab branch (non-compliant): $rbr"
+              DEL_NONCOMPLIANT+=("$rbr")
             fi
-            echo "  - deleting GitLab branch (non-compliant or stale): $rbr"
             del_specs+=(":refs/heads/${rbr}")
           done < <(git ls-remote --heads gitlab | sed 's#.*refs/heads/##')
 
@@ -1034,6 +1048,30 @@ jobs:
               || echo "::warning::One or more branches could not be deleted (they may be protected)."
           else
             echo "No branches to delete on GitLab."
+          fi
+
+          # ------------------------------------------------------------------
+          # Job summary — what was synced / skipped / deleted, per category.
+          # ------------------------------------------------------------------
+          join_branches() {
+            # Print "$@" as a backticked list, one per line (<br> for in-cell line
+            # breaks), or an em dash if none.
+            [ "$#" -gt 0 ] || { printf '—'; return; }
+            local out="" b
+            for b in "$@"; do out="${out:+$out<br>}\`$b\`"; done
+            printf '%s' "$out"
+          }
+
+          if [ -n "${GITHUB_STEP_SUMMARY:-}" ]; then
+            {
+              printf '### 🔁 Mirror sync summary — `%s`\n\n' "${GITHUB_REPOSITORY:-repository}"
+              printf '| Category | Count | Branches |\n'
+              printf '| --- | --: | --- |\n'
+              printf '| ✅ GitHub branches synced | %s | %s |\n'                    "${#SYNCED[@]}"           "$(join_branches "${SYNCED[@]}")"
+              printf '| ⏭️ GitHub non-compliant branches skipped | %s | %s |\n'     "${#SKIPPED[@]}"          "$(join_branches "${SKIPPED[@]}")"
+              printf '| 🗑️ GitLab non-compliant branches deleted | %s | %s |\n'     "${#DEL_NONCOMPLIANT[@]}" "$(join_branches "${DEL_NONCOMPLIANT[@]}")"
+              printf '| 🗑️ GitLab stale (compliant) branches deleted | %s | %s |\n' "${#DEL_STALE[@]}"        "$(join_branches "${DEL_STALE[@]}")"
+            } >> "$GITHUB_STEP_SUMMARY"
           fi
 
           echo ""
