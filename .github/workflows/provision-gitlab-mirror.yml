@@ -745,6 +745,8 @@ jobs:
           GITLAB_HOST:      ${{ secrets.GITLAB_HOST || vars.GITLAB_HOST }}
           GITLAB_API_TOKEN: ${{ secrets.GITLAB_API_TOKEN || vars.GITLAB_API_TOKEN }}
           PROJECT_ID:       ${{ steps.ensure_gitlab_project_exists.outputs.project_id }}
+          # Centralized definitions that produce a container image (space-separated).
+          CONTAINER_BUILD_DEFINITIONS: "quarkus-maven-native-app spring-maven-native-app"
         run: |
           set -euo pipefail
           cd repo.git
@@ -892,10 +894,9 @@ jobs:
             | sed -E 's/.*file:[[:space:]]*//; s/["'\'']//g' \
             | sed -E 's#.*/##; s/\.gitlab-ci\.yml$//' || true)"
 
-          CONTAINER_TYPES="quarkus-maven-native-app spring-maven-native-app"
           MATCHED=""
           for d in $DEFS; do
-            for c in $CONTAINER_TYPES; do
+            for c in $CONTAINER_BUILD_DEFINITIONS; do
               if [ "$d" = "$c" ]; then MATCHED="$d"; break 2; fi
             done
           done
@@ -903,7 +904,7 @@ jobs:
           if [ -z "$MATCHED" ]; then
             echo "ℹ️ '${BRANCH}' uses a non-container definition (${DEFS:-none}); build triggered, no image URL."
             CTLIST=""
-            for c in $CONTAINER_TYPES; do CTLIST="${CTLIST:+$CTLIST, }\`$c\`"; done
+            for c in $CONTAINER_BUILD_DEFINITIONS; do CTLIST="${CTLIST:+$CTLIST, }\`$c\`"; done
             OUTCOME="non-container"; finish 0
           fi
           echo "ℹ️ Container definition detected: ${MATCHED}"
