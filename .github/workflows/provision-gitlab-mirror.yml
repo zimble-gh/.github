@@ -814,8 +814,12 @@ jobs:
 
           if [ -z "$MATCHED" ]; then
             echo "ℹ️ '${BRANCH}' uses a non-container definition (${DEFS:-none}); skipping image URL."
+            _ctlist=""
+            for c in $CONTAINER_TYPES; do _ctlist="${_ctlist:+$_ctlist, }\`$c\`"; done
             printf -v _msg 'ℹ️ **Skipped** — this repo uses a non-container build definition (`%s`); no container image is produced.' "${DEFS:-none}"
             skip_summary "$_msg"
+            add_summary ""
+            add_summary "Container image URLs are derived only for these container-build definitions (as of now): ${_ctlist}."
             exit 0
           fi
           echo "ℹ️ Container definition detected: ${MATCHED}"
@@ -875,10 +879,23 @@ jobs:
               printf '### 📦 Container image (auto-build) — `%s`\n\n' "$BRANCH"
               printf 'Ahead-of-time image reference (derived _before_ the build runs):\n\n'
               printf '```\n%s\n```\n\n' "$IMAGE_URL"
-              printf '> ⚠️ **Predicted value — not yet built.** This reference is computed ahead of time from the branch name and the pom version.\n'
-              printf '> It becomes valid **only after** the `build-native-image` job completes successfully and publishes the image to the GitLab Container Registry.\n'
+
+              printf '> ⚠️\n'
               printf '>\n'
-              printf '> Do **not** assume the build will succeed — wait for the build/publish job in the pipeline to finish before pulling or referencing this image.\n'
+              printf '> **Predicted value — not yet built.** This reference becomes valid **only after** the `build-native-image` job completes successfully and publishes the image to the GitLab Container Registry.\n'
+              printf '>\n'
+              printf '> Do **NOT** assume the build will succeed — wait for the build/publish job in the pipeline to finish before pulling or referencing this image.\n\n'
+
+              printf '#### ℹ️ How this reference was computed\n\n'
+              printf 'It is assembled ahead of time (before the GitLab pipeline runs) from data already known at mirror time, mirroring exactly what the `build-native-image` job will tag and push:\n\n'
+              printf '| Part | Value | Source |\n'
+              printf '| --- | --- | --- |\n'
+              printf '| Registry | `%s` | `container_registry_image_prefix` from the GitLab project API (= `$CI_REGISTRY_IMAGE`) |\n' "$REGISTRY_IMAGE"
+              printf '| Version | `%s` | `project.version` in `pom.xml` |\n' "$VERSION"
+              printf '| Commit | `%s` | 8-char SHA of the branch tip |\n' "$SHORT_SHA"
+              printf '| Branch slug | `%s` | branch name, `/` → `-`, cut to 20 chars |\n' "$BRANCH_SLUG"
+              printf '| **Tag** | `%s` | `v<version>-<commit>-<branch-slug>` |\n\n' "$IMAGE_TAG"
+              printf '**Suggested use:** pre-fill deployment manifests, release notes, or a `docker pull` command with this reference now — but keep it provisional and confirm the pipeline'\''s build/publish job is green before actually pulling or deploying it.\n'
             } >> "$GITHUB_STEP_SUMMARY"
           fi
 
