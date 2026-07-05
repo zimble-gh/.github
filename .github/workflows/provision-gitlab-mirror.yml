@@ -853,7 +853,12 @@ jobs:
             echo "::warning::Branch '${BRANCH}' is not a compliant branch name - GitLab will not create a pipeline, so no build runs."
             skip_summary "⚠️ **No build triggered** — branch \`${BRANCH}\` is not a compliant branch name, so GitLab does not create a pipeline for it and nothing is built."
             add_summary ""
-            add_summary "Compliant branch names are: \`feature/*\`, \`fix/*\`, \`chore/*\`, \`hotfix/vX.Y.Z\`, \`release/vX.Y\`, and \`main\`."
+            add_summary "Push to a standard branch to trigger a build, for example:"
+            add_summary ""
+            add_summary "- \`main\`"
+            add_summary "- \`feature/*\`"
+            add_summary "- \`fix/*\`"
+            add_summary "- \`chore/*\`"
             exit 0
           fi
 
@@ -925,9 +930,9 @@ jobs:
               printf '| --- | --- | --- |\n'
               printf '| Registry | `%s` | `container_registry_image_prefix` from the GitLab project API (= `$CI_REGISTRY_IMAGE`) |\n' "$REGISTRY_IMAGE"
               printf '| Version | `%s` | `project.version` in `pom.xml` |\n' "$VERSION"
-              printf '| Commit | `%s` | 8-char SHA of the branch tip |\n' "$SHORT_SHA"
-              printf '| Branch slug | `%s` | branch name, `/` → `-`, cut to 20 chars |\n' "$BRANCH_SLUG"
-              printf '| **Tag** | `%s` | `v<version>-<commit>-<branch-slug>` |\n\n' "$IMAGE_TAG"
+              printf '| Commit SHA | `%s` | first 8 chars of the branch-tip commit SHA |\n' "$SHORT_SHA"
+              printf '| Branch slug | `%s` | branch name with slashes (`/`) replaced by hyphens (`-`), cut to 20 chars |\n' "$BRANCH_SLUG"
+              printf '| **Tag** | `%s` | `v<version>-<commit-sha>-<branch-slug>` |\n\n' "$IMAGE_TAG"
               printf '**Suggested use:** pre-fill deployment manifests, release notes, or a `docker pull` command with this reference now — but keep it provisional and confirm the pipeline'\''s build/publish job is green before actually pulling or deploying it.\n'
             } >> "$GITHUB_STEP_SUMMARY"
           fi
