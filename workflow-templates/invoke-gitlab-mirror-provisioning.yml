@@ -3,8 +3,8 @@ name: Invoke GitLab Mirror Provisioning
 on:
   workflow_dispatch:
     inputs:
-      auto_build:
-        description: "Auto-run the build for the selected branch on GitLab"
+      force_push:
+        description: "Force-push branches to GitLab (tick only if a branch diverged on GitLab and the normal push is rejected)"
         type: boolean
 
 jobs:
@@ -12,4 +12,4 @@ jobs:
     uses: zimble-gh/.github/.github/workflows/provision-gitlab-mirror.yml@main
     secrets: inherit
     with:
-      auto_build: ${{ inputs.auto_build }}
+      force_push: ${{ inputs.force_push }}

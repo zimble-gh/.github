@@ -3,14 +3,14 @@ name: Provision GitLab Mirror
 on:
   workflow_dispatch:
     inputs:
-      auto_build:
-        description: "Auto-run the build for the selected branch on GitLab"
+      force_push:
+        description: "Force-push branches to GitLab (use if a branch diverged on GitLab and the normal push is rejected)"
         type: boolean
         default: false
   workflow_call:
     inputs:
-      auto_build:
-        description: "Auto-run the build for the selected branch on GitLab"
+      force_push:
+        description: "Force-push branches to GitLab (use if a branch diverged on GitLab and the normal push is rejected)"
         type: boolean
         default: false
 
@@ -729,22 +729,23 @@ jobs:
           git remote add gitlab "$GITLAB_URL"
 
       # --------------------------------------------------
-      # Step 8: Auto-Build Selected Branch (opt-in)
+      # Step 8: Sync Selected Branch & Report Image
       # --------------------------------------------------
-      # Guarded by the auto_build input. Pushes ONLY the dispatched branch first,
-      # with a GitLab CI push option so its pipeline auto-runs the build
-      # (rule: $AUTO_BUILD == "true"). This advances the branch to its final SHA,
-      # so the subsequent --mirror push is a no-op for it and GitLab starts no
-      # second (manual) pipeline. For container-build repos it then derives and
-      # displays the resulting image URL.
+      # Owns the DISPATCHED branch: pushes it to GitLab (fast-forward by default,
+      # --force only when force_push is ticked) so its pipeline is created. The
+      # build auto-runs when the head commit message contains [auto-build]
+      # (GitLab rule: $CI_COMMIT_MESSAGE =~ /\[auto-build\]/). For container-build
+      # repos it then reports the ahead-of-time image reference. The mirror step
+      # handles all OTHER compliant branches (it excludes this one).
 
-      - name: Auto-Build Selected Branch
-        id: auto_build_selected_branch
-        if: ${{ inputs.auto_build == true && steps.ensure_gitlab_project_exists.outputs.project_path != '' }}
+      - name: Sync Selected Branch & Report Image
+        id: sync_selected_branch
+        if: ${{ steps.ensure_gitlab_project_exists.outputs.project_path != '' }}
         env:
           GITLAB_HOST:      ${{ secrets.GITLAB_HOST || vars.GITLAB_HOST }}
           GITLAB_API_TOKEN: ${{ secrets.GITLAB_API_TOKEN || vars.GITLAB_API_TOKEN }}
           PROJECT_ID:       ${{ steps.ensure_gitlab_project_exists.outputs.project_id }}
+          FORCE_PUSH:       ${{ inputs.force_push }}
           # Centralized definitions that produce a container image (space-separated).
           CONTAINER_BUILD_DEFINITIONS: "quarkus-maven-native-app spring-maven-native-app"
         run: |
@@ -753,7 +754,6 @@ jobs:
 
           BRANCH="${GITHUB_REF_NAME}"
 
-          # Retry a git push up to 5 times. Usage: push_with_retry <push args...>
           push_with_retry() {
             for i in {1..5}; do
               echo "Attempt $i of 5..."
@@ -764,81 +764,64 @@ jobs:
             return 1
           }
 
+          # Force-push only when force_push is ticked; otherwise fast-forward-only.
+          FORCE=()
+          [ "${FORCE_PUSH:-false}" = "true" ] && FORCE=(--force)
+
           # ------------------------------------------------------------------
-          # finish <exit-code>: write this step's ENTIRE summary section (double
-          # rule + step-name title + an outcome-specific body) in ONE place, then
-          # exit. The logic below only sets OUTCOME (and any data the body needs)
-          # and calls finish - all summary content for the step lives here.
+          # finish <exit-code>: write this step's ENTIRE summary section, then exit.
           # ------------------------------------------------------------------
           OUTCOME=""
-          BUILD_TRIGGERED="no"   # set to "yes" once the branch is pushed to trigger a build
-
-          # Manual-build instructions, shown when no build was triggered this run.
-          print_manual_steps() {
-            printf 'To build this commit, do one of the following in GitLab (**CI/CD → Pipelines**):\n\n'
-            printf -- '- **Re-run** the build job in the pipeline that may already exist for this commit, or\n'
-            printf -- '- **Create a new pipeline** for `%s` and start the build job manually from the pipeline screen.\n\n' "$BRANCH"
-          }
+          TOKEN_PRESENT="no"   # head commit message contains [auto-build]
+          SYNC_NOTE=""         # set after the push attempt (pushed vs already up to date)
 
           finish() {
             local code="$1"
             if [ -n "${GITHUB_STEP_SUMMARY:-}" ]; then
               {
                 printf '\n---\n\n---\n\n'
-                printf '## Auto-Build Selected Branch\n\n'
+                printf '## Selected Branch — Sync & Image\n\n'
                 case "$OUTCOME" in
                   not-a-branch)
-                    printf 'ℹ️ **Auto-build skipped** — dispatched on a %s (`%s`), not a branch.\n' "$GITHUB_REF_TYPE" "$BRANCH" ;;
+                    printf 'ℹ️ Dispatched on a %s (`%s`), not a branch — nothing to sync or build here.\n' "$GITHUB_REF_TYPE" "$BRANCH" ;;
                   non-compliant)
-                    printf '### ⚠️ No build triggered — `%s`\n\n' "$BRANCH"
-                    printf 'Branch `%s` is not a compliant branch name, so it was not pushed for a build (GitLab would not create a pipeline for it).\n\n' "$BRANCH"
-                    printf 'Push to a standard branch to trigger a build, for example:\n\n'
+                    printf '### ⚠️ Not synced — `%s`\n\n' "$BRANCH"
+                    printf 'Branch `%s` is not a compliant branch name, so it is not synced to GitLab and would not build.\n\n' "$BRANCH"
+                    printf 'Use a standard branch name, for example:\n\n'
                     printf -- '- `main`\n- `feature/*`\n- `fix/*`\n- `chore/*`\n' ;;
-                  no-ci)
-                    printf '### ℹ️ No build triggered — `%s`\n\n' "$BRANCH"
-                    printf 'No `.gitlab-ci.yml` on branch `%s`, so no pipeline can run and there is nothing to build.\n' "$BRANCH" ;;
                   push-failed)
-                    printf '### ❌ Build not triggered — `%s`\n\n' "$BRANCH"
-                    printf 'The targeted push to GitLab failed after multiple attempts, so no pipeline was created. Check the step log and retry.\n' ;;
+                    printf '### ❌ Push rejected — `%s`\n\n' "$BRANCH"
+                    printf 'The push of branch `%s` to GitLab was rejected — it likely diverged on GitLab (pushes are fast-forward-only unless `force_push` is ticked).\n\n' "$BRANCH"
+                    printf 'Re-run the workflow with **force_push** ticked to overwrite, after confirming it is safe.\n' ;;
+                  no-ci)
+                    printf '### ℹ️ Synced, no pipeline — `%s`\n\n' "$BRANCH"
+                    printf '%s No `.gitlab-ci.yml` on the branch, so no pipeline runs and there is no image.\n' "$SYNC_NOTE" ;;
                   non-container)
-                    printf '### ℹ️ No container image — `%s`\n\n' "$BRANCH"
-                    printf 'This repo uses a non-container build definition (`%s`), so there is no container image URL.\n\n' "${DEFS:-none}"
-                    if [ "$BUILD_TRIGGERED" = "yes" ]; then
-                      printf 'A build was triggered for this branch.\n\n'
-                    else
-                      printf 'Branch `%s` is already up to date on GitLab, so no new build was triggered by this run.\n\n' "$BRANCH"
-                      print_manual_steps
-                    fi
+                    printf '### ℹ️ Synced, no container image — `%s`\n\n' "$BRANCH"
+                    printf '%s This repo uses a non-container build definition (`%s`), so there is no container image URL.\n\n' "$SYNC_NOTE" "${DEFS:-none}"
                     printf 'Container image URLs are derived only for these container-build definitions (as of now): %s.\n' "$CTLIST" ;;
                   no-pom)
-                    printf '### ⚠️ No image reference — `%s`\n\n' "$BRANCH"
-                    printf 'No `pom.xml` on branch `%s`, so the image reference cannot be derived and a container build would fail.\n' "$BRANCH"
-                    [ "$BUILD_TRIGGERED" = "yes" ] || printf '\nBranch is already up to date on GitLab; no new build was triggered.\n' ;;
+                    printf '### ⚠️ Synced, no image reference — `%s`\n\n' "$BRANCH"
+                    printf '%s No `pom.xml` on the branch, so the image reference cannot be derived and a container build would fail.\n' "$SYNC_NOTE" ;;
                   bad-version)
-                    printf '### ⚠️ No image reference — `%s`\n\n' "$BRANCH"
-                    printf 'Could not read a literal semver `project.version` from `pom.xml` (got `%s`), so the image reference cannot be derived.\n' "${VERSION:-empty}" ;;
+                    printf '### ⚠️ Synced, no image reference — `%s`\n\n' "$BRANCH"
+                    printf '%s Could not read a literal semver `project.version` from `pom.xml` (got `%s`), so the image reference cannot be derived.\n' "$SYNC_NOTE" "${VERSION:-empty}" ;;
                   no-registry)
-                    printf '### ⚠️ No image reference — `%s`\n\n' "$BRANCH"
-                    printf 'Could not read `container_registry_image_prefix` from the GitLab API, so the image reference cannot be derived.\n' ;;
+                    printf '### ⚠️ Synced, no image reference — `%s`\n\n' "$BRANCH"
+                    printf '%s Could not read `container_registry_image_prefix` from the GitLab API, so the image reference cannot be derived.\n' "$SYNC_NOTE" ;;
                   success)
                     printf '### 📦 Container image — `%s`\n\n' "$BRANCH"
-                    if [ "$BUILD_TRIGGERED" = "yes" ]; then
-                      printf 'A build was **triggered** for this branch. Once the `build-native-image` job completes and publishes, the image will be available at the reference below.\n\n'
+                    printf '%s ' "$SYNC_NOTE"
+                    if [ "$TOKEN_PRESENT" = "yes" ]; then
+                      printf 'The head commit contains `[auto-build]`, so the build runs **automatically**. It will be published at:\n\n'
                     else
-                      printf 'Branch `%s` is **already up to date** on GitLab (commit `%s`), so **no new build was triggered** by this run. This image **may already have been built and published** by an earlier pipeline at the reference below — and if not, it will be produced at that same reference once you build it (steps below).\n\n' "$BRANCH" "$SHORT_SHA"
+                      printf 'The head commit has no `[auto-build]` token, so the build stays **manual** (add the token, or start the build job). If/when built, it will be published at:\n\n'
                     fi
                     printf '> 📋 **Image reference** — hover the box below and click the copy icon:\n\n'
                     printf '```text\n%s\n```\n\n' "$IMAGE_URL"
-                    if [ "$BUILD_TRIGGERED" = "yes" ]; then
-                      printf '> ⚠️\n>\n'
-                      printf '> **Predicted value — not yet built.** Valid **only after** the `build-native-image` job completes successfully and publishes to the GitLab Container Registry.\n>\n'
-                      printf '> Do **NOT** assume the build will succeed — wait for the build/publish job to finish before pulling or referencing this image.\n\n'
-                    else
-                      print_manual_steps
-                      printf '> ⚠️ Do **NOT** assume this image already exists — confirm it in the Container Registry (or wait for a build to publish it) before pulling or deploying.\n\n'
-                    fi
+                    printf '> ⚠️ Do **NOT** assume this image exists yet — it is a predicted reference. Confirm it in the Container Registry (or wait for the build/publish job to finish) before pulling or deploying.\n\n'
                     printf '#### ℹ️ How this reference was computed\n\n'
-                    printf 'It is assembled from data already known at mirror time, mirroring exactly what the `build-native-image` job tags and pushes:\n\n'
+                    printf 'It mirrors exactly what the `build-native-image` job tags and pushes:\n\n'
                     printf '| Part | Value | Source |\n'
                     printf '| --- | --- | --- |\n'
                     printf '| Registry | `%s` | `container_registry_image_prefix` from the GitLab project API (= `$CI_REGISTRY_IMAGE`) |\n' "$REGISTRY_IMAGE"
@@ -846,69 +829,60 @@ jobs:
                     printf '| Commit SHA | `%s` | first 8 chars of the branch-tip commit SHA |\n' "$SHORT_SHA"
                     printf '| Branch slug | `%s` | branch name with slashes (`/`) replaced by hyphens (`-`), cut to 20 chars |\n' "$BRANCH_SLUG"
                     printf '| **Tag** | `%s` | `v<version>-<commit-sha>-<branch-slug>` |\n\n' "$IMAGE_TAG"
-                    printf '**Suggested use:** pre-fill deployment manifests, release notes, or a `docker pull` command with this reference now — but keep it provisional and confirm the build/publish job is green before actually pulling or deploying it.\n' ;;
+                    printf '**Suggested use:** pre-fill deployment manifests, release notes, or a `docker pull` command now — but keep it provisional until the build/publish job is green.\n' ;;
                 esac
               } >> "$GITHUB_STEP_SUMMARY"
             fi
             exit "$code"
           }
 
-          # ==================================================================
-          # PHASE 1 - Pre-push checks. A build only happens if ALL of these pass;
-          # if any fails we DO NOT push (the branch is still mirrored later by the
-          # mirror step). Order: 1) ref is a branch  2) branch name is compliant
-          # 3) a .gitlab-ci.yml exists  4) there are new commits to push.
-          # ==================================================================
-
-          # 1) Auto-build applies to branches only (tags auto-build via their own rule).
+          # 1) Only branches are synced here (tags are not pushed by the mirror).
           if [ "${GITHUB_REF_TYPE}" != "branch" ]; then
-            echo "ℹ️ Dispatched on a ${GITHUB_REF_TYPE} ('${BRANCH}'), not a branch - skipping auto-build."
+            echo "ℹ️ Dispatched on a ${GITHUB_REF_TYPE} ('${BRANCH}'), not a branch."
             OUTCOME="not-a-branch"; finish 0
           fi
 
-          # 2) Non-compliant branch names never build, so do not push them.
+          # 2) Non-compliant branch names are not synced (and never build).
           if ! printf '%s' "$BRANCH" | grep -qE "$COMPLIANT_BRANCH_REGEX"; then
-            echo "::warning::Branch '${BRANCH}' is not a compliant branch name - not pushing; GitLab would not create a pipeline."
+            echo "::warning::Branch '${BRANCH}' is not a compliant branch name - not syncing."
             OUTCOME="non-compliant"; finish 0
           fi
 
-          # 3) No .gitlab-ci.yml => no pipeline can run.
-          CI_FILE="$(git show "refs/heads/${BRANCH}:.gitlab-ci.yml" 2>/dev/null || true)"
-          if [ -z "$CI_FILE" ]; then
-            echo "ℹ️ No .gitlab-ci.yml on '${BRANCH}' - not pushing; no pipeline would run."
-            OUTCOME="no-ci"; finish 0
-          fi
-
-          # 4) Push only if there are new commits. If the branch is already up to
-          # date on GitLab it is a no-op (GitLab creates no pipeline) - but we STILL
-          # derive the image reference below, framed as "already synced" so the user
-          # knows it may already exist or can be built manually.
+          # 3) Sync the selected branch to GitLab. This step OWNS it (the mirror step
+          # excludes it). Fast-forward by default; --force only when force_push. Skip
+          # when GitLab already has this exact commit (no-op => no new pipeline).
           LOCAL_SHA="$(git rev-parse "refs/heads/${BRANCH}")"
           REMOTE_SHA="$(git ls-remote gitlab "refs/heads/${BRANCH}" 2>/dev/null | awk 'NR==1{print $1}')"
           if [ -n "$REMOTE_SHA" ] && [ "$LOCAL_SHA" = "$REMOTE_SHA" ]; then
-            echo "ℹ️ Branch '${BRANCH}' already up to date on GitLab (${LOCAL_SHA}); not pushing (no-op)."
-            BUILD_TRIGGERED="no"
+            echo "ℹ️ Branch '${BRANCH}' already up to date on GitLab (${LOCAL_SHA}); not pushing."
+            SYNC_NOTE="Branch \`${BRANCH}\` was already up to date on GitLab (no new pipeline created this run)."
           else
-            echo ""
-            echo "Auto-build enabled - pushing branch '${BRANCH}' to trigger its build pipeline..."
-            if ! push_with_retry -o ci.variable="AUTO_BUILD=true" gitlab \
-                 "refs/heads/${BRANCH}:refs/heads/${BRANCH}"; then
-              echo "::error::Targeted auto-build push failed after multiple attempts."
+            echo "Pushing branch '${BRANCH}' to GitLab (force_push=${FORCE_PUSH:-false})..."
+            if ! push_with_retry "${FORCE[@]}" gitlab "refs/heads/${BRANCH}:refs/heads/${BRANCH}"; then
+              echo "::error::Push of '${BRANCH}' rejected (a diverged branch needs force_push)."
               OUTCOME="push-failed"; finish 1
             fi
-            BUILD_TRIGGERED="yes"
+            SYNC_NOTE="Branch \`${BRANCH}\` was pushed to GitLab."
           fi
 
-          # ==================================================================
-          # PHASE 2 - Image reference (container-build repos only). Runs whether a
-          # build was just triggered (new commits) or skipped (no-op / already
-          # synced); the wording in finish adapts to BUILD_TRIGGERED.
-          # ==================================================================
+          # 4) Auto-build token in the head commit?
+          HEAD_MSG="$(git log -1 --format=%B "refs/heads/${BRANCH}" 2>/dev/null || true)"
+          if printf '%s' "$HEAD_MSG" | grep -qF '[auto-build]'; then
+            TOKEN_PRESENT="yes"; echo "ℹ️ Head commit contains [auto-build] - build auto-runs."
+          else
+            echo "ℹ️ No [auto-build] token in head commit - build stays manual."
+          fi
+
+          # 5) Image reference (container-build repos only).
+          CI_FILE="$(git show "refs/heads/${BRANCH}:.gitlab-ci.yml" 2>/dev/null || true)"
+          if [ -z "$CI_FILE" ]; then
+            echo "ℹ️ No .gitlab-ci.yml on '${BRANCH}'."
+            OUTCOME="no-ci"; finish 0
+          fi
 
           # Which centralized definition does this repo include? Take every
           # non-comment `file: <name>.gitlab-ci.yml`, reduce to its base <name>.
-          # TODO: also handle CI/CD component includes
-          #       ( - component: <host>/<path>/<name>@<ref> ) once repos adopt them.
+          # TODO: also handle CI/CD component includes ( - component: .../<name>@<ref> ).
           DEFS="$(printf '%s\n' "$CI_FILE" \
             | grep -E '^[[:space:]]*file:' \
             | grep -vE '^[[:space:]]*#' \
@@ -923,17 +897,16 @@ jobs:
           done
 
           if [ -z "$MATCHED" ]; then
-            echo "ℹ️ '${BRANCH}' uses a non-container definition (${DEFS:-none}); build triggered, no image URL."
+            echo "ℹ️ '${BRANCH}' uses a non-container definition (${DEFS:-none})."
             CTLIST=""
             for c in $CONTAINER_BUILD_DEFINITIONS; do CTLIST="${CTLIST:+$CTLIST, }\`$c\`"; done
             OUTCOME="non-container"; finish 0
           fi
           echo "ℹ️ Container definition detected: ${MATCHED}"
 
-          # pom.xml is required both to build the image and to derive its version.
           POM="$(git show "refs/heads/${BRANCH}:pom.xml" 2>/dev/null || true)"
           if [ -z "$POM" ]; then
-            echo "::warning::No pom.xml on '${BRANCH}' - the container build will fail and the image URL cannot be derived."
+            echo "::warning::No pom.xml on '${BRANCH}'."
             OUTCOME="no-pom"; finish 0
           fi
 
@@ -965,16 +938,12 @@ jobs:
             | sed -n 's/.*"container_registry_image_prefix"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p')"
 
           if [ -z "$REGISTRY_IMAGE" ]; then
-            echo "::warning::Could not read container_registry_image_prefix from the GitLab API; cannot derive the image URL."
+            echo "::warning::Could not read container_registry_image_prefix from the GitLab API."
             OUTCOME="no-registry"; finish 0
           fi
 
           IMAGE_URL="${REGISTRY_IMAGE}:${IMAGE_TAG}"
-          echo ""
-          echo "=================================================="
-          echo "📦 Container image (produced once the auto-build completes):"
-          echo "   ${IMAGE_URL}"
-          echo "=================================================="
+          echo "📦 Image reference: ${IMAGE_URL} (auto-build token: ${TOKEN_PRESENT})"
           OUTCOME="success"; finish 0
 
       # --------------------------------------------------
@@ -987,6 +956,10 @@ jobs:
         run: |
           set -euo pipefail
           cd repo.git
+
+          # This step force-syncs GitHub -> GitLab for ALL compliant branches
+          # EXCEPT the dispatched one, which the "Sync Selected Branch" step already
+          # pushed (with the force_push-controlled behavior).
 
           push_with_retry() {
             for i in {1..5}; do
@@ -1020,8 +993,13 @@ jobs:
           DEL_STALE=()         # compliant branches deleted on GitLab (gone from GitHub)
 
           # Classify local branches: compliant -> push, non-compliant -> skip.
+          # Exclude the dispatched branch - the "Sync Selected Branch" step owns it.
           push_specs=()
           for br in "${LOCAL_BRANCHES[@]}"; do
+            if [ "$br" = "${GITHUB_REF_NAME:-}" ]; then
+              echo "  - selected branch handled by the sync step; not mirrored here: $br"
+              continue
+            fi
             if printf '%s' "$br" | grep -qE "$COMPLIANT_BRANCH_REGEX"; then
               push_specs+=("refs/heads/${br}:refs/heads/${br}")
               SYNCED+=("$br")
@@ -1113,7 +1091,7 @@ jobs:
 
               # Conditional push/delete status notes.
               if [ "$PUSH_STATUS" = "failed" ]; then
-                printf '> ❌ **Compliant branch push FAILED** after multiple attempts — the job is marked failed. Check the step log and retry.\n\n'
+                printf '> ❌ **Compliant branch push FAILED** after multiple attempts — check the step log (e.g. token/permissions or a protected ref).\n\n'
               elif [ "$PUSH_STATUS" = "ok" ]; then
                 printf '> ✅ Compliant branches pushed successfully.\n\n'
               fi
@@ -1141,7 +1119,8 @@ jobs:
           if [ "$PUSH_STATUS" = "failed" ]; then
             echo ""
             echo "❌ ERROR: Compliant branch push failed after multiple attempts."
-            echo "  - Verify token and permissions (or protected-branch rules), then retry the workflow."
+            echo "  - A branch may have diverged on GitLab (rejected because pushes are fast-forward-only by default)."
+            echo "  - Re-run with the force_push checkbox ticked to overwrite (after confirming it is safe), or verify token/permissions."
             exit 1
           fi
 
