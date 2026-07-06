@@ -754,16 +754,6 @@ jobs:
 
           BRANCH="${GITHUB_REF_NAME}"
 
-          push_with_retry() {
-            for i in {1..5}; do
-              echo "Attempt $i of 5..."
-              if git push "$@"; then echo "✅ Push succeeded"; return 0; fi
-              echo "⚠️ Attempt $i failed"
-              sleep 5
-            done
-            return 1
-          }
-
           # Force-push only when force_push is ticked; otherwise fast-forward-only.
           FORCE=()
           [ "${FORCE_PUSH:-false}" = "true" ] && FORCE=(--force)
@@ -858,7 +848,7 @@ jobs:
             SYNC_NOTE="Branch \`${BRANCH}\` was already up to date on GitLab (no new pipeline created this run)."
           else
             echo "Pushing branch '${BRANCH}' to GitLab (force_push=${FORCE_PUSH:-false})..."
-            if ! push_with_retry "${FORCE[@]}" gitlab "refs/heads/${BRANCH}:refs/heads/${BRANCH}"; then
+            if ! git push "${FORCE[@]}" gitlab "refs/heads/${BRANCH}:refs/heads/${BRANCH}"; then
               echo "::error::Push of '${BRANCH}' rejected (a diverged branch needs force_push)."
               OUTCOME="push-failed"; finish 1
             fi
