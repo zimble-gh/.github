@@ -805,7 +805,16 @@ jobs:
                     if [ "$TOKEN_PRESENT" = "yes" ]; then
                       printf 'The head commit contains `[auto-build]`, so the build runs **automatically**. It will be published at:\n\n'
                     else
-                      printf 'The head commit has no `[auto-build]` token, so the build stays **manual** (add the token, or start the build job). If/when built, it will be published at:\n\n'
+                      printf 'The head commit has no `[auto-build]` token, so the build stays **manual**. To make it build automatically, put `[auto-build]` in the commit message — for example:\n\n'
+                      printf '```bash\n'
+                      printf '# include the token in your next commit\n'
+                      printf 'git commit -m "your message [auto-build]"\n\n'
+                      printf '# or trigger a build on the current tree with an empty commit\n'
+                      printf 'git commit --allow-empty -m "trigger build [auto-build]"\n\n'
+                      printf '# then push to GitHub and re-run this mirror workflow\n'
+                      printf 'git push origin %s\n' "$BRANCH"
+                      printf '```\n\n'
+                      printf 'You can also start the build job manually from the pipeline. If/when built, it will be published at:\n\n'
                     fi
                     printf '> 📋 **Image reference** — hover the box below and click the copy icon:\n\n'
                     printf '```text\n%s\n```\n\n' "$IMAGE_URL"
