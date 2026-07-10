@@ -655,11 +655,6 @@ jobs:
               "</table>"
             ].join("\n");
 
-            // Reusable "which project" line for the summary (URL + ID).
-            const PROJECT_LINE =
-              `<p><strong>GitLab project:</strong> <a href="${PROJECT_URL}">${PROJECT_URL}</a>` +
-              ` &nbsp;·&nbsp; ID <code>${PROJECT_ID}</code></p>`;
-
             // Collect the variables to sync, resolving the GitLab key + flags from the name.
             // Scanning both variables and secrets keeps the flags driven purely by the name.
             const toSync = [];
@@ -680,7 +675,6 @@ jobs:
               console.log("  ℹ️ No syncable GL_ variables found - nothing to sync");
               await core.summary
                 .addHeading("GitHub → GitLab CICD Variable Sync", 2)
-                .addRaw(PROJECT_LINE, true)
                 .addRaw("No GitHub variables or secrets matched the <code>GL_&lt;flags&gt;__&lt;name&gt;</code> naming convention, so there was nothing to sync.", true)
                 .addRaw(CONVENTION_HTML, true)
                 .write();
@@ -812,7 +806,6 @@ jobs:
 
             core.summary
               .addHeading("GitHub → GitLab CICD Variable Sync", 2)
-              .addRaw(PROJECT_LINE, true)
               .addTable([
                 headerCells(["Total", ...STATUS_META.map((s) => s.label)]),
                 [String(results.length), ...STATUS_META.map((s) => String(counts[s.key]))]
