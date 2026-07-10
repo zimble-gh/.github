@@ -574,38 +574,42 @@ jobs:
               return message;
             }
 
-            // Collapsible "how to" block appended to the job summary so authors can see
-            // the naming convention and rules directly on the run. Written as HTML (with
-            // escaped angle brackets) so it renders reliably in the step summary.
+            // "How to" block appended to the job summary (always, whether or not any
+            // candidates were found) so authors can see the naming convention and rules
+            // directly on the run. Written as HTML (with escaped angle brackets and tables)
+            // so it renders cleanly in the step summary.
             const CONVENTION_HTML = [
-              "<details>",
-              "<summary><strong>Naming convention &amp; rules</strong> (how to create / sync variables)</summary>",
-              "",
-              "<p>Name a GitHub <em>Variable</em> or <em>Secret</em> as <code>GL_&lt;flags&gt;__&lt;name&gt;</code> and it is synced to this GitLab project. The <code>GL_&lt;flags&gt;__</code> part is stripped; the remainder becomes the GitLab key.</p>",
-              "<p><strong>Flags</strong> (letters before <code>__</code>, any order / combination):</p>",
+              "<h3>📘 How to create &amp; sync variables</h3>",
+              "<p>Name a GitHub <strong>Variable</strong> or <strong>Secret</strong> as <code>GL_&lt;flags&gt;__&lt;name&gt;</code>. It is synced to this GitLab project with the <code>GL_&lt;flags&gt;__</code> prefix stripped, so whatever follows the <code>__</code> becomes the GitLab key.</p>",
+              "<h4>Flags</h4>",
+              "<table>",
+              "<thead><tr><th>Flag</th><th>Meaning</th></tr></thead>",
+              "<tbody>",
+              "<tr><td align=\"center\"><code>M</code></td><td>Masked</td></tr>",
+              "<tr><td align=\"center\"><code>P</code></td><td>Protected</td></tr>",
+              "<tr><td align=\"center\"><code>R</code></td><td>Raw (disables <code>$</code> expansion)</td></tr>",
+              "<tr><td align=\"center\"><code>H</code></td><td>Masked <em>and</em> hidden (implies masked; write-only, can only be set at creation)</td></tr>",
+              "</tbody>",
+              "</table>",
+              "<p>Flags may be combined in any order — e.g. <code>GL_MP__…</code>, <code>GL_HPR__…</code>. Use an empty block <code>GL__NAME</code> for no flags.</p>",
+              "<h4>Rules</h4>",
               "<ul>",
-              "<li><code>M</code> — masked</li>",
-              "<li><code>P</code> — protected</li>",
-              "<li><code>R</code> — raw (disables <code>$</code> expansion)</li>",
-              "<li><code>H</code> — masked <em>and</em> hidden (implies masked; value is write-only in GitLab and can only be set at creation)</li>",
+              "<li>An invalid flag block (unknown letter or duplicate) is tolerated — the variable still syncs, with all flags off.</li>",
+              "<li>The name is everything after the <em>first</em> <code>__</code>, taken verbatim (underscores allowed; extra separator underscores are kept).</li>",
+              "<li>Ignored: names without the <code>GL_</code> prefix, without <code>__</code>, or with an empty name.</li>",
+              "<li>Masking follows the <em>flag</em>, not the source — a Secret without <code>M</code>/<code>H</code> syncs <strong>unmasked</strong>.</li>",
+              "<li>Masked/hidden values must be a single line, at least 8 characters, contain no whitespace, and use only Base64 characters (A-Z a-z 0-9 + / =) plus <code>@ : . ~ -</code>.</li>",
               "</ul>",
-              "<p><strong>Rules</strong></p>",
-              "<ul>",
-              "<li>No flags: use an empty block, e.g. <code>GL__NAME</code>.</li>",
-              "<li>An invalid flag block (unknown letter or duplicate) is tolerated — the variable still syncs with all flags defaulted to false.</li>",
-              "<li>The name is everything after the first <code>__</code>, taken verbatim (it may contain underscores; extra separator underscores are kept).</li>",
-              "<li>Names without the <code>GL_</code> prefix, without <code>__</code>, or with an empty name are ignored.</li>",
-              "<li>Masking is driven by the flag, not the source — a Secret without <code>M</code>/<code>H</code> syncs <strong>unmasked</strong>.</li>",
-              "</ul>",
-              "<p><strong>Masked / hidden value requirements</strong> (flags <code>M</code> and <code>H</code>): single line, at least 8 characters, no whitespace, and only Base64 characters (A-Z a-z 0-9 + / =) plus <code>@ : . ~ -</code>.</p>",
-              "<p><strong>Examples</strong></p>",
-              "<ul>",
-              "<li><code>GL__DB_HOST</code> → <code>DB_HOST</code> (no flags)</li>",
-              "<li><code>GL_M__DB_PASSWORD</code> → <code>DB_PASSWORD</code> (masked)</li>",
-              "<li><code>GL_MP__API_KEY</code> → <code>API_KEY</code> (masked + protected)</li>",
-              "<li><code>GL_H__SESSION_TOKEN</code> → <code>SESSION_TOKEN</code> (masked + hidden)</li>",
-              "</ul>",
-              "</details>"
+              "<h4>Examples</h4>",
+              "<table>",
+              "<thead><tr><th>GitHub name</th><th>GitLab key</th><th>Result</th></tr></thead>",
+              "<tbody>",
+              "<tr><td><code>GL__DB_HOST</code></td><td><code>DB_HOST</code></td><td>no flags</td></tr>",
+              "<tr><td><code>GL_M__DB_PASSWORD</code></td><td><code>DB_PASSWORD</code></td><td>masked</td></tr>",
+              "<tr><td><code>GL_MP__API_KEY</code></td><td><code>API_KEY</code></td><td>masked + protected</td></tr>",
+              "<tr><td><code>GL_H__SESSION_TOKEN</code></td><td><code>SESSION_TOKEN</code></td><td>masked + hidden</td></tr>",
+              "</tbody>",
+              "</table>"
             ].join("\n");
 
             // Collect the variables to sync, resolving the GitLab key + flags from the name.
