@@ -577,11 +577,11 @@ jobs:
             // Collect the variables to sync, resolving the GitLab key + flags from the name.
             // Scanning both variables and secrets keeps the flags driven purely by the name.
             const toSync = [];
-            for (const source of [allGhVars, allGhSecrets]) {
+            for (const [sourceLabel, source] of [["variable", allGhVars], ["secret", allGhSecrets]]) {
               for (const [ghKey, value] of Object.entries(source)) {
                 const parsed = parseGlKey(ghKey);
                 if (parsed) {
-                  toSync.push({ ghKey, value, ...parsed });
+                  toSync.push({ ghKey, value, source : sourceLabel, ...parsed });
                 }
               }
             }
@@ -592,13 +592,19 @@ jobs:
 
             if (toSync.length === 0) {
               console.log("  ℹ️ No syncable GL_ variables found - nothing to sync");
+              await core.summary
+                .addHeading("GitHub → GitLab CICD Variable Sync", 2)
+                .addRaw("No GitHub variables or secrets matched the `GL_<flags>__<name>` naming convention, so there was nothing to sync.")
+                .write();
               return;
             }
 
-            // Track failed variables so their GitHub + GitLab names can be reported.
-            const failed = [];
+            // Track the outcome of every candidate (for the job summary report) and the
+            // failed ones (for the annotation + setFailed message).
+            const results = [];
+            const failed  = [];
 
-            for (const { ghKey, glKey, value, masked, protected : isProtected, raw, hidden } of toSync) {
+            for (const { ghKey, glKey, value, masked, protected : isProtected, raw, hidden, source } of toSync) {
               // GitLab requires a hidden variable to also be masked.
               const desiredMasked = masked || hidden;
               const displayValue  = desiredMasked ? "***" : value;
@@ -607,6 +613,18 @@ jobs:
               // (the hidden visibility cannot be toggled afterwards), so it is added to the
               // create body alone; updates send the resolved 'masked' value instead.
               const sharedOptions = { ...baseVariableOptions, protected : isProtected, raw };
+
+              const result = {
+                source,
+                ghKey,
+                glKey,
+                masked    : desiredMasked,
+                protected : isProtected,
+                raw,
+                hidden,
+                status    : "unchanged",
+                reason    : ""
+              };
 
               try {
                 const existing = await glRequest("GET", `/projects/${PROJECT_ID}/variables/${glKey}`);
@@ -623,6 +641,7 @@ jobs:
                   if (!created.ok) {
                     throw new Error(glWriteError("create", created, desiredMasked));
                   }
+                  result.status = "created";
                   console.log(`  ✓ Variable created : ${glKey}=${displayValue}`);
                 } else if (existing.ok) {
                   const isHiddenNow = existing.data.hidden === true;
@@ -640,6 +659,7 @@ jobs:
                   const valueChanged     = hidden ? true : existing.data.value !== value;
 
                   if (!valueChanged && !maskedChanged && !protectedChanged && !rawChanged) {
+                    result.status = "unchanged";
                     console.log(`  ✓ Variable already up to date : ${glKey}`);
                   } else {
                     const reasons = [];
@@ -656,17 +676,95 @@ jobs:
                     if (!updated.ok) {
                       throw new Error(glWriteError("update", updated, desiredMasked));
                     }
+                    result.status = "updated";
                     console.log(`  ✓ Variable updated : ${glKey}=${displayValue}`);
                   }
                 } else {
-                  throw new Error(`Unexpected response fetching variable -> ${existing.status} ${JSON.stringify(existing.data)}`);
+                  throw new Error(`Unexpected response fetching variable -> ${existing.status} ${describeGlError(existing.data)}`);
                 }
               } catch (error) {
+                result.status = "failed";
+                result.reason = error.message;
                 // Keep the full reason (including any GitLab error detail) per variable.
                 failed.push({ ghKey, glKey, reason : error.message });
                 core.error(`Failed to sync variable [GitHub: '${ghKey}' -> GitLab: '${glKey}']\n${error.message}`);
               }
+
+              results.push(result);
             }
+
+            // ─────────────────────────────────────────────
+            // Job summary: report on every sync candidate
+            // ─────────────────────────────────────────────
+            const counts = {
+              created   : results.filter((r) => r.status === "created").length,
+              updated   : results.filter((r) => r.status === "updated").length,
+              unchanged : results.filter((r) => r.status === "unchanged").length,
+              failed    : results.filter((r) => r.status === "failed").length
+            };
+
+            const STATUS_LABEL = {
+              created   : "➕ created",
+              updated   : "♻️ updated",
+              unchanged : "✓ unchanged",
+              failed    : "❌ failed"
+            };
+
+            const yesNo = (flag) => (flag ? "✓" : "—");
+
+            const summaryHeader = [
+              { data : "Source",      header : true },
+              { data : "GitHub name", header : true },
+              { data : "GitLab key",  header : true },
+              { data : "Masked",      header : true },
+              { data : "Protected",   header : true },
+              { data : "Raw",         header : true },
+              { data : "Hidden",      header : true },
+              { data : "Result",      header : true }
+            ];
+
+            const summaryRows = results
+              // Sort failures first, then updated/created, then unchanged - easier to scan.
+              .slice()
+              .sort((a, b) => {
+                const order = { failed : 0, created : 1, updated : 2, unchanged : 3 };
+                return (order[a.status] - order[b.status]) || a.glKey.localeCompare(b.glKey);
+              })
+              .map((r) => [
+                r.source,
+                `\`${r.ghKey}\``,
+                `\`${r.glKey}\``,
+                yesNo(r.masked),
+                yesNo(r.protected),
+                yesNo(r.raw),
+                yesNo(r.hidden),
+                STATUS_LABEL[r.status] || r.status
+              ]);
+
+            core.summary
+              .addHeading("GitHub → GitLab CICD Variable Sync", 2)
+              .addRaw(`**Project ID:** \`${PROJECT_ID}\``, true)
+              .addRaw(
+                `**Candidates:** ${results.length} &nbsp;•&nbsp; ➕ ${counts.created} created` +
+                ` &nbsp;•&nbsp; ♻️ ${counts.updated} updated &nbsp;•&nbsp; ✓ ${counts.unchanged} unchanged` +
+                ` &nbsp;•&nbsp; ❌ ${counts.failed} failed`,
+                true
+              )
+              .addTable([summaryHeader, ...summaryRows]);
+
+            if (counts.failed > 0) {
+              core.summary.addHeading("Failure details", 3);
+              core.summary.addRaw(
+                failed
+                  .map(({ ghKey, glKey, reason }) =>
+                    `- \`${ghKey}\` → \`${glKey}\`\n  \`\`\`\n  ${reason.replace(/\n/g, "\n  ")}\n  \`\`\``
+                  )
+                  .join("\n"),
+                true
+              );
+            }
+
+            await core.summary.write();
 
             if (failed.length > 0) {
               const failedList = failed
