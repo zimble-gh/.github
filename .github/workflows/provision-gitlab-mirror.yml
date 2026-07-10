@@ -594,7 +594,7 @@ jobs:
               console.log("  ℹ️ No syncable GL_ variables found - nothing to sync");
               await core.summary
                 .addHeading("GitHub → GitLab CICD Variable Sync", 2)
-                .addRaw("No GitHub variables or secrets matched the `GL_<flags>__<name>` naming convention, so there was nothing to sync.")
+                .addRaw("No GitHub variables or secrets matched the <code>GL_&lt;flags&gt;__&lt;name&gt;</code> naming convention, so there was nothing to sync.")
                 .write();
               return;
             }
