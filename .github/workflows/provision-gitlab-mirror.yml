@@ -300,11 +300,15 @@ jobs:
             }
 
       # --------------------------------------------------
-      # Step 4: Ensure GitLab CICD Variable GH_PROJECT_REPO
+      # Step 4: Sync Reserved GitLab CICD Variables
       # --------------------------------------------------
+      #
+      # These variables are managed by this workflow and are treated as RESERVED:
+      # the variable sync step never prunes them. Keep the reserved key list here in
+      # sync with the RESERVED_KEYS constant in the 'Sync GitHub Variables' step.
 
-      - name: Ensure GitLab CICD Variable GH_PROJECT_REPO
-        id: ensure_gitlab_gh_project_repo_variable
+      - name: Sync Reserved GitLab CICD Variables
+        id: sync_reserved_gitlab_variables
         if: ${{ steps.ensure_gitlab_project_exists.outputs.project_id != '' }}
         uses: actions/github-script@v9
         env:
@@ -670,18 +674,11 @@ jobs:
             console.log("------------------------------------");
 
             if (toSync.length === 0) {
-              console.log("  ℹ️ No syncable GL_ variables found - nothing to sync");
-              await core.summary
-                .addRaw("<br><br>", true)
-                .addHeading("GitHub → GitLab CICD Variable Sync", 2)
-                .addRaw("No GitHub variables or secrets matched the <code>GL_&lt;flags&gt;__&lt;name&gt;</code> naming convention, so there was nothing to sync.", true)
-                .addRaw(CONVENTION_HTML, true)
-                .write();
-              return;
+              console.log("  ℹ️ No syncable GL_ variables found - will still check for stale variables to prune");
             }
 
-            // Track the outcome of every candidate (for the job summary report) and the
-            // failed ones (for the annotation + setFailed message).
+            // Track the outcome of every candidate and pruned variable (for the job summary
+            // report) and the failed ones (for the annotation + setFailed message).
             const results = [];
             const failed  = [];
 
@@ -769,6 +766,75 @@ jobs:
             }
 
             // ─────────────────────────────────────────────
+            // Prune stale project-level variables
+            // ─────────────────────────────────────────────
+            // A variable is "stale" if it exists as a project-level CICD variable but is
+            // neither a current sync candidate nor reserved. Deletion is limited to
+            // project-level variables: the project variables endpoint never returns
+            // group-level (inherited) variables, so those are always left untouched.
+            // Reserved variables (managed by the 'Sync Reserved GitLab CICD Variables'
+            // step) are never pruned - keep this list in sync with that step.
+            const RESERVED_KEYS = new Set(["GH_PROJECT_REPO"]);
+            const desiredKeys   = new Set(toSync.map((v) => v.glKey));
+
+            async function listProjectVariables() {
+              const all = [];
+              const perPage = 100;
+              for (let page = 1; ; page++) {
+                const res = await glRequest("GET", `/projects/${PROJECT_ID}/variables?per_page=${perPage}&page=${page}`);
+                if (!res.ok) {
+                  throw new Error(`Failed to list project variables -> ${res.status} ${describeGlError(res.data)}`);
+                }
+                const batch = Array.isArray(res.data) ? res.data : [];
+                all.push(...batch);
+                if (batch.length < perPage) break;
+              }
+              return all;
+            }
+
+            console.log("");
+            console.log("ℹ️ Pruning stale project-level variables...");
+            console.log("------------------------------------");
+
+            try {
+              const projectVariables = await listProjectVariables();
+              for (const variable of projectVariables) {
+                const key = variable.key;
+                if (RESERVED_KEYS.has(key)) {
+                  continue;   // reserved - never pruned
+                }
+                if (desiredKeys.has(key)) {
+                  continue;   // still a sync candidate - keep
+                }
+
+                console.log(`  → Deleting stale project variable '${key}'`);
+                const del = await glRequest("DELETE", `/projects/${PROJECT_ID}/variables/${encodeURIComponent(key)}`);
+                if (del.ok || del.status === 404) {
+                  results.push({
+                    source    : "gitlab",
+                    ghKey     : "—",
+                    glKey     : key,
+                    masked    : variable.masked === true,
+                    protected : variable.protected === true,
+                    raw       : variable.raw === true,
+                    hidden    : variable.hidden === true,
+                    status    : "deleted",
+                    reason    : ""
+                  });
+                  console.log(`  ✓ Deleted stale variable : ${key}`);
+                } else {
+                  const reason = `Failed to delete stale variable -> ${del.status} ${describeGlError(del.data)}`;
+                  results.push({ source : "gitlab", ghKey : "—", glKey : key, masked : false, protected : false, raw : false, hidden : false, status : "failed", reason });
+                  failed.push({ ghKey : "(stale)", glKey : key, reason });
+                  core.error(`Failed to delete stale variable [GitLab: '${key}']\n${reason}`);
+                }
+              }
+            } catch (error) {
+              failed.push({ ghKey : "—", glKey : "(prune)", reason : error.message });
+              core.error(`Failed to prune stale project variables\n${error.message}`);
+            }
+
+            // ─────────────────────────────────────────────
             // Job summary: report on every sync candidate
             // ─────────────────────────────────────────────
             // Single source of truth for statuses: drives counting, the overview table
@@ -777,6 +843,7 @@ jobs:
               { key : "failed",    label : "❌ Failed"    },
               { key : "created",   label : "➕ Created"   },
               { key : "updated",   label : "♻️ Updated"   },
+              { key : "deleted",   label : "🗑️ Deleted"   },
               { key : "unchanged", label : "✓ Unchanged" }
             ];
             const statusLabel = Object.fromEntries(STATUS_META.map((s) => [s.key, s.label]));
@@ -805,16 +872,22 @@ jobs:
 
             core.summary
               .addRaw("<br><br>", true)
-              .addHeading("GitHub → GitLab CICD Variable Sync", 2)
-              .addTable([
-                headerCells(["Total", ...STATUS_META.map((s) => s.label)]),
-                [String(results.length), ...STATUS_META.map((s) => String(counts[s.key]))]
-              ])
-              .addHeading("Details", 3)
-              .addTable([
-                headerCells(["Source", "GitHub name", "GitLab key", "Masked", "Protected", "Raw", "Hidden", "Result"]),
-                ...detailRows
-              ]);
+              .addHeading("GitHub → GitLab CICD Variable Sync", 2);
+
+            if (results.length === 0) {
+              core.summary.addRaw("No GitHub variables or secrets matched the <code>GL_&lt;flags&gt;__&lt;name&gt;</code> naming convention, and there were no stale project variables to remove.", true);
+            } else {
+              core.summary
+                .addTable([
+                  headerCells(["Total", ...STATUS_META.map((s) => s.label)]),
+                  [String(results.length), ...STATUS_META.map((s) => String(counts[s.key]))]
+                ])
+                .addHeading("Details", 3)
+                .addTable([
+                  headerCells(["Source", "GitHub name", "GitLab key", "Masked", "Protected", "Raw", "Hidden", "Result"]),
+                  ...detailRows
+                ]);
+            }
 
             if (counts.failed > 0) {
               core.summary.addHeading("Failure details", 3);
