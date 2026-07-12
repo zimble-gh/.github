@@ -335,13 +335,13 @@ jobs:
             //   environment_scope = "*"     -> all environments
             //   masked            = false   -> visible (not masked)
             //   protected         = false   -> not protected
-            //   raw               = false   -> expand enabled, so it is interpolable in .gitlab-ci.yml
+            //   raw               = true    -> expansion disabled, value stored literally
             const variableOptions = {
               variable_type     : "env_var",
               environment_scope : "*",
               masked            : false,
               protected         : false,
-              raw               : false,
+              raw               : true,
               description       : "GitHub source repo of the project."
             };
 
@@ -414,10 +414,16 @@ jobs:
                 }
                 console.log(`  ✓ Variable created : ${VARIABLE_KEY}=${VARIABLE_VALUE}`);
               } else if (existing.ok) {
-                if (existing.data.value === VARIABLE_VALUE) {
+                const valueChanged = existing.data.value !== VARIABLE_VALUE;
+                const rawChanged   = existing.data.raw !== true;
+
+                if (!valueChanged && !rawChanged) {
                   console.log(`  ✓ Variable already up to date : ${VARIABLE_KEY}=${VARIABLE_VALUE}`);
                 } else {
-                  console.log(`  → Variable differs (current='${existing.data.value}') - updating to '${VARIABLE_VALUE}'`);
+                  const reasons = [];
+                  if (valueChanged) reasons.push(`value '${existing.data.value}' -> '${VARIABLE_VALUE}'`);
+                  if (rawChanged)   reasons.push(`raw ${existing.data.raw} -> true`);
+                  console.log(`  → Variable differs (${reasons.join(", ")}) - updating '${VARIABLE_KEY}'`);
                   const updated = await glRequest("PUT", `/projects/${PROJECT_ID}/variables/${VARIABLE_KEY}`, {
                     value : VARIABLE_VALUE,
                     ...variableOptions
