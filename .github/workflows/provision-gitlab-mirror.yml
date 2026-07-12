@@ -857,6 +857,13 @@ jobs:
             const statusLabel = Object.fromEntries(STATUS_META.map((s) => [s.key, s.label]));
             const statusOrder = Object.fromEntries(STATUS_META.map((s, i) => [s.key, i]));
 
+            // Friendly labels for the Source column.
+            const SOURCE_LABEL = {
+              variable : "GitHub Actions variable",
+              secret   : "GitHub Actions secret",
+              gitlab   : "GitLab CICD variable"
+            };
+
             const counts = Object.fromEntries(STATUS_META.map((s) => [s.key, 0]));
             for (const r of results) { counts[r.status]++; }
 
@@ -868,7 +875,7 @@ jobs:
               .slice()
               .sort((a, b) => (statusOrder[a.status] - statusOrder[b.status]) || a.glKey.localeCompare(b.glKey))
               .map((r) => [
-                r.source,
+                SOURCE_LABEL[r.source] || r.source,
                 `<code>${r.ghKey}</code>`,
                 `<code>${r.glKey}</code>`,
                 yesNo(r.masked),
