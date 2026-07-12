@@ -460,16 +460,17 @@ jobs:
             // A double underscore separates the 'GL_' prefix (plus optional flag block)
             // from the actual variable name. The flag block sets boolean GitLab
             // properties, in any order/combination:
-            //   M -> masked    P -> protected    R -> raw (expansion disabled)
+            //   M -> masked    P -> protected    E -> expansion (enable $ variable expansion)
             //   H -> masked and hidden (implies masked; value is write-only in GitLab)
+            // Expansion is DISABLED by default (GitLab raw=true); the E flag enables it (raw=false).
             // The 'GL_<flags>__' part is stripped before saving:
-            //   GL__<name>       -> masked=false, protected=false, raw=false  (no flags)
+            //   GL__<name>       -> masked=false, protected=false, expansion=false  (no flags)
             //   GL_M__<name>     -> masked
             //   GL_P__<name>     -> protected
-            //   GL_R__<name>     -> raw
+            //   GL_E__<name>     -> expansion enabled
             //   GL_H__<name>     -> masked and hidden
             //   GL_MP__<name>    -> masked + protected   (order/duplication independent)
-            //   GL_MPR__<name>   -> masked + protected + raw   ... and every other combo
+            //   GL_MPE__<name>   -> masked + protected + expansion   ... and every other combo
             // The 'hidden' visibility (H) can only be set when the variable is first
             // created; it cannot be toggled afterwards, and GitLab never returns a hidden
             // variable's value (so its value cannot be compared - see the sync loop).
@@ -485,7 +486,7 @@ jobs:
             //   GL_X__FOO        -> name 'FOO', no flags
             const PREFIX     = "GL_";
             const SEPARATOR  = "__";
-            const FLAG_PROPS = { M : "masked", P : "protected", R : "raw", H : "hidden" };
+            const FLAG_PROPS = { M : "masked", P : "protected", E : "expansion", H : "hidden" };
 
             // Parse a GitHub key into the GitLab key + resolved flags, or null if it is
             // not a syncable 'GL_<flags>__<name>' variable.
@@ -506,7 +507,7 @@ jobs:
                 return null;
               }
 
-              const flags = { masked : false, protected : false, raw : false, hidden : false };
+              const flags = { masked : false, protected : false, expansion : false, hidden : false };
 
               // Empty flag block (GL__<name>) means "all flags default". A non-empty block
               // is applied only when valid (known M/P/R letters, no duplicates); an invalid
@@ -531,8 +532,9 @@ jobs:
             // GitLab CICD variable options common to every synced variable:
             //   variable_type     = "env_var" -> environment variable
             //   environment_scope = "*"       -> all environments
-            // ('masked', 'protected' and 'raw' are resolved per variable from its flags.
-            //  raw=false keeps the value interpolable in .gitlab-ci.yml.)
+            // ('masked', 'protected' and expansion are resolved per variable from its flags;
+            //  expansion is off by default (raw=true), so values are stored literally unless
+            //  the E flag enables $ variable expansion.)
             const baseVariableOptions = {
               variable_type     : "env_var",
               environment_scope : "*"
@@ -632,11 +634,11 @@ jobs:
               "<tbody>",
               "<tr><td align=\"center\"><code>M</code></td><td>Masked</td></tr>",
               "<tr><td align=\"center\"><code>P</code></td><td>Protected</td></tr>",
-              "<tr><td align=\"center\"><code>R</code></td><td>Raw (disables <code>$</code> expansion)</td></tr>",
+              "<tr><td align=\"center\"><code>E</code></td><td>Expansion — enable <code>$</code> variable expansion (off by default)</td></tr>",
               "<tr><td align=\"center\"><code>H</code></td><td>Masked <em>and</em> hidden (implies masked; write-only, can only be set at creation)</td></tr>",
               "</tbody>",
               "</table>",
-              "<p>Flags may be combined in any order — e.g. <code>GL_MP__…</code>, <code>GL_HPR__…</code>. Use an empty block <code>GL__NAME</code> for no flags.</p>",
+              "<p>Flags may be combined in any order — e.g. <code>GL_MP__…</code>, <code>GL_HPE__…</code>. Use an empty block <code>GL__NAME</code> for no flags.</p>",
               "<h4>Rules</h4>",
               "<ul>",
               "<li>An invalid flag block (unknown letter or duplicate) is tolerated — the variable still syncs, with all flags off.</li>",
@@ -689,10 +691,12 @@ jobs:
             const results = [];
             const failed  = [];
 
-            for (const { ghKey, glKey, value, masked, protected : isProtected, raw, hidden, source } of toSync) {
+            for (const { ghKey, glKey, value, masked, protected : isProtected, expansion, hidden, source } of toSync) {
               // GitLab requires a hidden variable to also be masked.
               const desiredMasked = masked || hidden;
               const displayValue  = desiredMasked ? "***" : value;
+              // GitLab stores the inverse of expansion as 'raw' (raw=true means no expansion).
+              const raw = !expansion;
 
               // Options shared by create and update. 'masked_and_hidden' is create-only
               // (the hidden visibility cannot be toggled afterwards), so it is added to the
@@ -705,7 +709,7 @@ jobs:
                 glKey,
                 masked    : desiredMasked,
                 protected : isProtected,
-                raw,
+                expanded  : expansion,
                 hidden,
                 status    : "unchanged",
                 reason    : ""
@@ -715,7 +719,7 @@ jobs:
                 const existing = await glRequest("GET", `/projects/${PROJECT_ID}/variables/${glKey}`);
 
                 if (existing.status === 404) {
-                  console.log(`  → Variable not found - creating '${glKey}' (from '${ghKey}', masked=${desiredMasked}, hidden=${hidden}, protected=${isProtected}, raw=${raw})`);
+                  console.log(`  → Variable not found - creating '${glKey}' (from '${ghKey}', masked=${desiredMasked}, hidden=${hidden}, protected=${isProtected}, expanded=${expansion})`);
                   const createBody = { key : glKey, value : value, ...sharedOptions };
                   if (hidden) {
                     createBody.masked_and_hidden = true;   // implies masked
@@ -748,7 +752,7 @@ jobs:
                     if (valueChanged)     reasons.push(hidden ? "value refreshed (hidden, cannot verify)" : "value changed");
                     if (maskedChanged)    reasons.push(`masked ${existing.data.masked} -> ${desiredMasked}`);
                     if (protectedChanged) reasons.push(`protected ${existing.data.protected} -> ${isProtected}`);
-                    if (rawChanged)       reasons.push(`raw ${existing.data.raw} -> ${raw}`);
+                    if (rawChanged)       reasons.push(`expanded ${existing.data.raw !== true} -> ${expansion}`);
                     console.log(`  → Variable differs (${reasons.join(", ")}) - updating '${glKey}'`);
                     await writeVariable("update", "PUT", `/projects/${PROJECT_ID}/variables/${glKey}`, {
                       value  : value,
@@ -824,7 +828,7 @@ jobs:
                     glKey     : key,
                     masked    : variable.masked === true,
                     protected : variable.protected === true,
-                    raw       : variable.raw === true,
+                    expanded  : variable.raw !== true,
                     hidden    : variable.hidden === true,
                     status    : "deleted",
                     reason    : ""
@@ -832,7 +836,7 @@ jobs:
                   console.log(`  ✓ Deleted stale variable : ${key}`);
                 } else {
                   const reason = `Failed to delete stale variable -> ${del.status} ${describeGlError(del.data)}`;
-                  results.push({ source : "gitlab", ghKey : "—", glKey : key, masked : false, protected : false, raw : false, hidden : false, status : "failed", reason });
+                  results.push({ source : "gitlab", ghKey : "—", glKey : key, masked : false, protected : false, expanded : false, hidden : false, status : "failed", reason });
                   failed.push({ ghKey : "(stale)", glKey : key, reason });
                   core.error(`Failed to delete stale variable [GitLab: '${key}']\n${reason}`);
                 }
@@ -880,7 +884,7 @@ jobs:
                 `<code>${r.glKey}</code>`,
                 yesNo(r.masked),
                 yesNo(r.protected),
-                yesNo(r.raw),
+                yesNo(r.expanded),
                 yesNo(r.hidden),
                 statusLabel[r.status] || r.status
               ]);
@@ -899,7 +903,7 @@ jobs:
                 ])
                 .addHeading("Details", 3)
                 .addTable([
-                  headerCells(["Source", "GitHub name", "GitLab key", "Masked", "Protected", "Raw", "Hidden", "Result"]),
+                  headerCells(["Source", "GitHub name", "GitLab key", "Masked", "Protected", "Expanded", "Hidden", "Result"]),
                   ...detailRows
                 ]);
             }
