@@ -1,7 +1,6 @@
 # GitLab Variable Sync — Enhancement Plan
 
 > **Scope:** the `sync_github_variables_to_gitlab` step in `.github/workflows/provision-gitlab-mirror.yml`
-> **Status:** proposal / working document (not committed)
 
 ---
 
