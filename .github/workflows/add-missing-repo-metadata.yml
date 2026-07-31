@@ -34,7 +34,7 @@ on:
         - None
         - 7eleven
         - mercadia
-        - petro
+        - petro7
         - telcel
 
       dryRun:

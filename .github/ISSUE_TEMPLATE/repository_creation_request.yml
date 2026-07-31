@@ -108,7 +108,7 @@ body:
       options:
         - 7eleven
         - mercadia
-        - petro
+        - petro7
         - telcel
     validations:
       required: false
