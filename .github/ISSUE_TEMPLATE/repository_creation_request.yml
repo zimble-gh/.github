@@ -72,6 +72,7 @@ body:
 
         - --- Platform ---
         - cicd-util-scripts
+        - container-definition
         - gitops
         - helm-charts
         - local-util-scripts
