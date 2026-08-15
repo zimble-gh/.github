@@ -256,10 +256,14 @@ jobs:
               }
               console.log(`  → Creating project : ${projectName}`);
               const created = await glFetch("POST", "/projects", {
-                name          : projectName,
-                path          : projectName,
-                namespace_id  : groupId,
-                visibility    : "private"
+                name           : projectName,
+                path           : projectName,
+                namespace_id   : groupId,
+                visibility     : "private",
+                // 'main' is required upfront (see 'Configure Default Branch'): this
+                // only takes effect once the first branch is pushed, since the
+                // project has no commits at creation time.
+                default_branch : "main"
               });
               console.log(`  ✓ Project created : ${created.web_url} (id=${created.id})`);
               return created;
@@ -410,7 +414,466 @@ jobs:
             }
 
       # --------------------------------------------------
-      # Step 4: Sync Reserved GitLab CICD Variables
+      # Step 4: Configure Default Branch
+      # --------------------------------------------------
+      #
+      # 'main' is set as the default branch:
+      #   - New projects: requested directly in the 'Ensure GitLab Project Exists'
+      #     creation call (findOrCreateProject's POST body), so it takes effect the
+      #     moment the first branch is pushed - no repository content exists yet at
+      #     this point in the job, so there is nothing to reconcile here.
+      #   - Pre-existing projects: fixed up here via PUT /projects/:id. GitLab
+      #     rejects this if 'main' does not exist in the repository yet, so the
+      #     fix-up is skipped (not failed) until 'main' has been mirrored at least
+      #     once; the check simply re-runs (and self-heals) on every job run.
+
+      - name: Configure Default Branch
+        id: configure_default_branch
+        if: ${{ steps.ensure_gitlab_project_exists.outputs.project_id != '' }}
+        uses: actions/github-script@v9
+        env:
+          GITLAB_HOST:      ${{ secrets.GITLAB_HOST || vars.GITLAB_HOST }}
+          GITLAB_API_TOKEN: ${{ secrets.GITLAB_API_TOKEN || vars.GITLAB_API_TOKEN }}
+          PROJECT_ID:       ${{ steps.ensure_gitlab_project_exists.outputs.project_id }}
+        with:
+          script: |
+            const GITLAB_HOST      = process.env.GITLAB_HOST;
+            const GITLAB_API_TOKEN = process.env.GITLAB_API_TOKEN;
+            const PROJECT_ID       = process.env.PROJECT_ID;
+
+            const DEFAULT_BRANCH = "main";
+
+            async function glRequest(method, path, body) {
+              const res = await fetch(`${GITLAB_HOST}/api/v4${path}`, {
+                method,
+                headers: {
+                  "PRIVATE-TOKEN" : GITLAB_API_TOKEN,
+                  "Content-Type"  : "application/json"
+                },
+                ...(body ? { body : JSON.stringify(body) } : {})
+              });
+              let data = null;
+              if (res.status !== 204) {
+                const text = await res.text().catch(() => "");
+                if (text) {
+                  try {
+                    data = JSON.parse(text);
+                  } catch {
+                    data = text;
+                  }
+                }
+              }
+              return { status : res.status, ok : res.ok, data };
+            }
+
+            function describeGlError(data) {
+              if (!data) {
+                return "(no response body)";
+              }
+              if (typeof data === "string") {
+                return data;
+              }
+              if (typeof data.error === "string") {
+                return data.error;
+              }
+              if (typeof data.message === "string") {
+                return data.message;
+              }
+              if (data.message && typeof data.message === "object") {
+                return Object.entries(data.message)
+                  .map(([field, msgs]) => `${field}: ${Array.isArray(msgs) ? msgs.join("; ") : msgs}`)
+                  .join(" | ");
+              }
+              return JSON.stringify(data);
+            }
+
+            console.log("");
+            console.log(`ℹ️ Ensuring default branch is '${DEFAULT_BRANCH}'...`);
+            console.log("------------------------------------");
+
+            try {
+              const project = await glRequest("GET", `/projects/${PROJECT_ID}`);
+              if (!project.ok) {
+                throw new Error(`Failed to fetch project -> ${project.status} ${describeGlError(project.data)}`);
+              }
+
+              if (project.data.default_branch === DEFAULT_BRANCH) {
+                console.log(`  ✓ Default branch already '${DEFAULT_BRANCH}'`);
+              } else if (project.data.empty_repo) {
+                console.log(`  ℹ️ Repository has no commits yet - default branch was already requested as '${DEFAULT_BRANCH}' at project creation; nothing to reconcile.`);
+              } else {
+                const branchCheck = await glRequest("GET", `/projects/${PROJECT_ID}/repository/branches/${encodeURIComponent(DEFAULT_BRANCH)}`);
+                if (branchCheck.status === 404) {
+                  console.log(`  ℹ️ Branch '${DEFAULT_BRANCH}' does not exist on GitLab yet - skipping for now (will self-heal once it is mirrored).`);
+                } else if (!branchCheck.ok) {
+                  throw new Error(`Failed to check branch '${DEFAULT_BRANCH}' -> ${branchCheck.status} ${describeGlError(branchCheck.data)}`);
+                } else {
+                  console.log(`  → Default branch differs ('${project.data.default_branch}' -> '${DEFAULT_BRANCH}') - updating`);
+                  const updated = await glRequest("PUT", `/projects/${PROJECT_ID}`, { default_branch : DEFAULT_BRANCH });
+                  if (!updated.ok) {
+                    throw new Error(`Failed to update default branch -> ${updated.status} ${describeGlError(updated.data)}`);
+                  }
+                  console.log(`  ✓ Default branch updated to '${DEFAULT_BRANCH}'`);
+                }
+              }
+            } catch (error) {
+              core.setFailed(`\n❌ Failed to configure default branch\n${error.message}`);
+            }
+
+      # --------------------------------------------------
+      # Step 5: Enforce Branch Naming Policy
+      # --------------------------------------------------
+      #
+      # Restricts branch creation on GitLab to the same compliant names this
+      # workflow itself mirrors (COMPLIANT_BRANCH_REGEX), via a project push rule.
+      # Push rules are a GitLab Premium/Ultimate feature: on a Free-tier instance
+      # the API responds 403, which is logged as a warning (not a failure) so
+      # provisioning still completes - branch naming is still enforced
+      # client-side by this workflow's own mirror logic either way.
+
+      - name: Enforce Branch Naming Policy
+        id: enforce_branch_naming_policy
+        if: ${{ steps.ensure_gitlab_project_exists.outputs.project_id != '' }}
+        uses: actions/github-script@v9
+        env:
+          GITLAB_HOST:            ${{ secrets.GITLAB_HOST || vars.GITLAB_HOST }}
+          GITLAB_API_TOKEN:       ${{ secrets.GITLAB_API_TOKEN || vars.GITLAB_API_TOKEN }}
+          PROJECT_ID:             ${{ steps.ensure_gitlab_project_exists.outputs.project_id }}
+          COMPLIANT_BRANCH_REGEX: ${{ env.COMPLIANT_BRANCH_REGEX }}
+        with:
+          script: |
+            const GITLAB_HOST       = process.env.GITLAB_HOST;
+            const GITLAB_API_TOKEN  = process.env.GITLAB_API_TOKEN;
+            const PROJECT_ID        = process.env.PROJECT_ID;
+            const BRANCH_NAME_REGEX = process.env.COMPLIANT_BRANCH_REGEX;
+
+            async function glRequest(method, path, body) {
+              const res = await fetch(`${GITLAB_HOST}/api/v4${path}`, {
+                method,
+                headers: {
+                  "PRIVATE-TOKEN" : GITLAB_API_TOKEN,
+                  "Content-Type"  : "application/json"
+                },
+                ...(body ? { body : JSON.stringify(body) } : {})
+              });
+              let data = null;
+              if (res.status !== 204) {
+                const text = await res.text().catch(() => "");
+                if (text) {
+                  try {
+                    data = JSON.parse(text);
+                  } catch {
+                    data = text;
+                  }
+                }
+              }
+              return { status : res.status, ok : res.ok, data };
+            }
+
+            function describeGlError(data) {
+              if (!data) {
+                return "(no response body)";
+              }
+              if (typeof data === "string") {
+                return data;
+              }
+              if (typeof data.error === "string") {
+                return data.error;
+              }
+              if (typeof data.message === "string") {
+                return data.message;
+              }
+              if (data.message && typeof data.message === "object") {
+                return Object.entries(data.message)
+                  .map(([field, msgs]) => `${field}: ${Array.isArray(msgs) ? msgs.join("; ") : msgs}`)
+                  .join(" | ");
+              }
+              return JSON.stringify(data);
+            }
+
+            console.log("");
+            console.log(`ℹ️ Ensuring branch-name push rule '${BRANCH_NAME_REGEX}'...`);
+            console.log("------------------------------------");
+
+            try {
+              const existing = await glRequest("GET", `/projects/${PROJECT_ID}/push_rule`);
+              if (!existing.ok) {
+                throw new Error(`Failed to fetch push rule -> ${existing.status} ${describeGlError(existing.data)}`);
+              }
+
+              // GitLab returns 200 with a JSON 'null' body when no push rule
+              // has ever been configured for this project - not a 404.
+              if (existing.data && existing.data.branch_name_regex === BRANCH_NAME_REGEX) {
+                console.log(`  ✓ Push rule already up to date : branch_name_regex='${BRANCH_NAME_REGEX}'`);
+              } else {
+                const method = existing.data ? "PUT" : "POST";
+                console.log(`  → ${existing.data ? "Updating" : "Creating"} push rule with branch_name_regex='${BRANCH_NAME_REGEX}'`);
+                const result = await glRequest(method, `/projects/${PROJECT_ID}/push_rule`, { branch_name_regex : BRANCH_NAME_REGEX });
+                if (!result.ok) {
+                  if (result.status === 403) {
+                    console.log(`  ⚠️ Skipped - GitLab responded 403 (push rules require GitLab Premium/Ultimate on this instance): ${describeGlError(result.data)}`);
+                  } else {
+                    throw new Error(`Failed to ${existing.data ? "update" : "create"} push rule -> ${result.status} ${describeGlError(result.data)}`);
+                  }
+                } else {
+                  console.log(`  ✓ Push rule ${existing.data ? "updated" : "created"} : branch_name_regex='${BRANCH_NAME_REGEX}'`);
+                }
+              }
+            } catch (error) {
+              core.setFailed(`\n❌ Failed to enforce branch naming policy\n${error.message}`);
+            }
+
+      # --------------------------------------------------
+      # Step 6: Protect main & Release Branches
+      # --------------------------------------------------
+      #
+      # 'main' and release branches (release/vX.Y, matched here via the wildcard
+      # 'release/v*' - GitLab protected-branch names support glob wildcards
+      # only, not full regex) get identical protection: push and merge
+      # restricted to Maintainers, force push disallowed. A rule can be created
+      # before the branch itself exists on GitLab (standard GitLab behavior -
+      # the protection simply applies once the branch is pushed), so this runs
+      # safely even for a project created earlier in this same job.
+      #
+      # Reconciliation deletes and re-creates a mismatched rule rather than
+      # patching it in place, since not every field this workflow manages
+      # (push/merge access level) is guaranteed to be PATCH-able on every
+      # GitLab version - delete+recreate is universally supported.
+
+      - name: Protect main & Release Branches
+        id: protect_main_and_release_branches
+        if: ${{ steps.ensure_gitlab_project_exists.outputs.project_id != '' }}
+        uses: actions/github-script@v9
+        env:
+          GITLAB_HOST:      ${{ secrets.GITLAB_HOST || vars.GITLAB_HOST }}
+          GITLAB_API_TOKEN: ${{ secrets.GITLAB_API_TOKEN || vars.GITLAB_API_TOKEN }}
+          PROJECT_ID:       ${{ steps.ensure_gitlab_project_exists.outputs.project_id }}
+        with:
+          script: |
+            const GITLAB_HOST      = process.env.GITLAB_HOST;
+            const GITLAB_API_TOKEN = process.env.GITLAB_API_TOKEN;
+            const PROJECT_ID       = process.env.PROJECT_ID;
+
+            const MAINTAINER = 40;
+
+            const PROTECTED_BRANCHES = [
+              { name : "main",       label : "main" },
+              { name : "release/v*", label : "release/vX.Y (release/v*)" }
+            ];
+
+            const DESIRED = {
+              push_access_level  : MAINTAINER,
+              merge_access_level : MAINTAINER,
+              allow_force_push   : false
+            };
+
+            async function glRequest(method, path, body) {
+              const res = await fetch(`${GITLAB_HOST}/api/v4${path}`, {
+                method,
+                headers: {
+                  "PRIVATE-TOKEN" : GITLAB_API_TOKEN,
+                  "Content-Type"  : "application/json"
+                },
+                ...(body ? { body : JSON.stringify(body) } : {})
+              });
+              let data = null;
+              if (res.status !== 204) {
+                const text = await res.text().catch(() => "");
+                if (text) {
+                  try {
+                    data = JSON.parse(text);
+                  } catch {
+                    data = text;
+                  }
+                }
+              }
+              return { status : res.status, ok : res.ok, data };
+            }
+
+            function describeGlError(data) {
+              if (!data) {
+                return "(no response body)";
+              }
+              if (typeof data === "string") {
+                return data;
+              }
+              if (typeof data.error === "string") {
+                return data.error;
+              }
+              if (typeof data.message === "string") {
+                return data.message;
+              }
+              if (data.message && typeof data.message === "object") {
+                return Object.entries(data.message)
+                  .map(([field, msgs]) => `${field}: ${Array.isArray(msgs) ? msgs.join("; ") : msgs}`)
+                  .join(" | ");
+              }
+              return JSON.stringify(data);
+            }
+
+            // GitLab's response represents access levels as arrays (e.g.
+            // push_access_levels: [{ access_level: 40, ... }]), even though the
+            // create/update request accepts the singular *_access_level shorthand.
+            function levelMatches(levels, expectedAccessLevel) {
+              return Array.isArray(levels) && levels.length === 1 && levels[0].access_level === expectedAccessLevel;
+            }
+
+            function matches(rule) {
+              return levelMatches(rule.push_access_levels, DESIRED.push_access_level)
+                && levelMatches(rule.merge_access_levels, DESIRED.merge_access_level)
+                && rule.allow_force_push === DESIRED.allow_force_push;
+            }
+
+            async function ensureProtectedBranch(name, label) {
+              console.log("");
+              console.log(`ℹ️ Ensuring protected branch '${label}'...`);
+              console.log("------------------------------------");
+
+              const encodedName = encodeURIComponent(name);
+              const existing = await glRequest("GET", `/projects/${PROJECT_ID}/protected_branches/${encodedName}`);
+
+              if (existing.status === 404) {
+                console.log(`  → Not protected yet - creating`);
+              } else if (existing.ok) {
+                if (matches(existing.data)) {
+                  console.log(`  ✓ Already protected as required`);
+                  return;
+                }
+                console.log(`  → Protection differs - re-creating`);
+                const deleted = await glRequest("DELETE", `/projects/${PROJECT_ID}/protected_branches/${encodedName}`);
+                if (!deleted.ok) {
+                  throw new Error(`Failed to unprotect '${name}' before re-creating -> ${deleted.status} ${describeGlError(deleted.data)}`);
+                }
+              } else {
+                throw new Error(`Failed to fetch protected branch '${name}' -> ${existing.status} ${describeGlError(existing.data)}`);
+              }
+
+              const created = await glRequest("POST", `/projects/${PROJECT_ID}/protected_branches`, { name, ...DESIRED });
+              if (!created.ok) {
+                throw new Error(`Failed to protect '${name}' -> ${created.status} ${describeGlError(created.data)}`);
+              }
+              console.log(`  ✓ Protected : push=Maintainer, merge=Maintainer, force-push=disallowed`);
+            }
+
+            try {
+              for (const { name, label } of PROTECTED_BRANCHES) {
+                await ensureProtectedBranch(name, label);
+              }
+            } catch (error) {
+              core.setFailed(`\n❌ Failed to protect main/release branches\n${error.message}`);
+            }
+
+      # --------------------------------------------------
+      # Step 7: Protect Version Tags
+      # --------------------------------------------------
+      #
+      # Tags matching v<major>.<minor>.<patch> are protected at the Maintainer
+      # level, via the wildcard 'v*' (GitLab protected-tag names support glob
+      # wildcards only, not full regex). This is safe in practice: the only
+      # tags this pipeline (and the branch-naming push rule, where licensed)
+      # ever let through are vX.Y.Z-shaped, so 'v*' never protects anything
+      # outside the intended shape.
+
+      - name: Protect Version Tags
+        id: protect_version_tags
+        if: ${{ steps.ensure_gitlab_project_exists.outputs.project_id != '' }}
+        uses: actions/github-script@v9
+        env:
+          GITLAB_HOST:      ${{ secrets.GITLAB_HOST || vars.GITLAB_HOST }}
+          GITLAB_API_TOKEN: ${{ secrets.GITLAB_API_TOKEN || vars.GITLAB_API_TOKEN }}
+          PROJECT_ID:       ${{ steps.ensure_gitlab_project_exists.outputs.project_id }}
+        with:
+          script: |
+            const GITLAB_HOST      = process.env.GITLAB_HOST;
+            const GITLAB_API_TOKEN = process.env.GITLAB_API_TOKEN;
+            const PROJECT_ID       = process.env.PROJECT_ID;
+
+            const MAINTAINER  = 40;
+            const TAG_PATTERN = "v*";
+
+            async function glRequest(method, path, body) {
+              const res = await fetch(`${GITLAB_HOST}/api/v4${path}`, {
+                method,
+                headers: {
+                  "PRIVATE-TOKEN" : GITLAB_API_TOKEN,
+                  "Content-Type"  : "application/json"
+                },
+                ...(body ? { body : JSON.stringify(body) } : {})
+              });
+              let data = null;
+              if (res.status !== 204) {
+                const text = await res.text().catch(() => "");
+                if (text) {
+                  try {
+                    data = JSON.parse(text);
+                  } catch {
+                    data = text;
+                  }
+                }
+              }
+              return { status : res.status, ok : res.ok, data };
+            }
+
+            function describeGlError(data) {
+              if (!data) {
+                return "(no response body)";
+              }
+              if (typeof data === "string") {
+                return data;
+              }
+              if (typeof data.error === "string") {
+                return data.error;
+              }
+              if (typeof data.message === "string") {
+                return data.message;
+              }
+              if (data.message && typeof data.message === "object") {
+                return Object.entries(data.message)
+                  .map(([field, msgs]) => `${field}: ${Array.isArray(msgs) ? msgs.join("; ") : msgs}`)
+                  .join(" | ");
+              }
+              return JSON.stringify(data);
+            }
+
+            function levelMatches(levels, expectedAccessLevel) {
+              return Array.isArray(levels) && levels.length === 1 && levels[0].access_level === expectedAccessLevel;
+            }
+
+            console.log("");
+            console.log(`ℹ️ Ensuring protected tag '${TAG_PATTERN}'...`);
+            console.log("------------------------------------");
+
+            try {
+              const encodedName = encodeURIComponent(TAG_PATTERN);
+              const existing = await glRequest("GET", `/projects/${PROJECT_ID}/protected_tags/${encodedName}`);
+
+              if (existing.status === 404) {
+                console.log(`  → Not protected yet - creating`);
+              } else if (existing.ok) {
+                if (levelMatches(existing.data.create_access_levels, MAINTAINER)) {
+                  console.log(`  ✓ Already protected as required`);
+                  return;
+                }
+                console.log(`  → Protection differs - re-creating`);
+                const deleted = await glRequest("DELETE", `/projects/${PROJECT_ID}/protected_tags/${encodedName}`);
+                if (!deleted.ok) {
+                  throw new Error(`Failed to unprotect '${TAG_PATTERN}' before re-creating -> ${deleted.status} ${describeGlError(deleted.data)}`);
+                }
+              } else {
+                throw new Error(`Failed to fetch protected tag '${TAG_PATTERN}' -> ${existing.status} ${describeGlError(existing.data)}`);
+              }
+
+              const created = await glRequest("POST", `/projects/${PROJECT_ID}/protected_tags`, { name : TAG_PATTERN, create_access_level : MAINTAINER });
+              if (!created.ok) {
+                throw new Error(`Failed to protect tag '${TAG_PATTERN}' -> ${created.status} ${describeGlError(created.data)}`);
+              }
+              console.log(`  ✓ Protected : create=Maintainer`);
+            } catch (error) {
+              core.setFailed(`\n❌ Failed to protect version tags\n${error.message}`);
+            }
+
+      # --------------------------------------------------
+      # Step 8: Sync Reserved GitLab CICD Variables
       # --------------------------------------------------
       #
       # These variables are managed by this workflow and are treated as RESERVED:
@@ -551,7 +1014,7 @@ jobs:
             }
 
       # --------------------------------------------------
-      # Step 5: Sync GitHub Variables To GitLab CICD
+      # Step 9: Sync GitHub Variables To GitLab CICD
       # --------------------------------------------------
 
       - name: Sync GitHub Variables To GitLab CICD
@@ -1052,7 +1515,7 @@ jobs:
             }
 
       # --------------------------------------------------
-      # Step 6: Generate GitHub App Token
+      # Step 10: Generate GitHub App Token
       # --------------------------------------------------
 
       - name: Generate GitHub App Token
@@ -1064,7 +1527,7 @@ jobs:
           owner:       ${{ github.repository_owner }}
 
       # --------------------------------------------------
-      # Step 7: Prepare Mirror Clone
+      # Step 11: Prepare Mirror Clone
       # --------------------------------------------------
       # Bare mirror clone of the GitHub repo + the GitLab remote. Shared by the
       # (optional) auto-build step and the full mirror push that follow. The
@@ -1101,7 +1564,7 @@ jobs:
           git remote add gitlab "$GITLAB_URL"
 
       # --------------------------------------------------
-      # Step 8: Sync Selected Branch & Report Image
+      # Step 12: Sync Selected Branch & Report Image
       # --------------------------------------------------
       # Owns the DISPATCHED branch: pushes it to GitLab (fast-forward by default,
       # --force only when force_push is ticked) so its pipeline is created. The
@@ -1318,7 +1781,7 @@ jobs:
           OUTCOME="success"; finish 0
 
       # --------------------------------------------------
-      # Step 9: Mirror Repository To GitLab
+      # Step 13: Mirror Repository To GitLab
       # --------------------------------------------------
 
       - name: Mirror Repository To GitLab
