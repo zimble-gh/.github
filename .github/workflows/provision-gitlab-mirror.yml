@@ -84,7 +84,36 @@ jobs:
             }
 
       # --------------------------------------------------
-      # Step 2: Validate And Extract Repository Metadata
+      # Step 2: Generate GitHub App Token
+      # --------------------------------------------------
+      #
+      # Moved up front (this used to run right before 'Prepare Mirror Clone')
+      # because 'Detect Force-Push Protection Skip Flags' also needs it - an
+      # org-installed GitHub App token is the only way to read an
+      # ORG-level Actions variable via the API (the default GITHUB_TOKEN is
+      # always scoped to this one repo and has no org-wide authority, no
+      # matter what this workflow's 'permissions:' block grants). The token
+      # is valid for an hour, comfortably longer than this job takes, so
+      # generating it once here and reusing it later (in 'Prepare Mirror
+      # Clone') is safe.
+      #
+      # Prerequisite: the GitHub App behind GH_APP_ID/GH_APP_CLIENT_ID must
+      # have 'Organization variables' (read) and 'Variables' (read) granted,
+      # in addition to whatever permissions it already has for the mirror
+      # clone - otherwise the org/repo variable lookups below fail closed
+      # (logged as a warning, treated as 'not set') rather than actually
+      # detecting the opt-out.
+
+      - name: Generate GitHub App Token
+        id: generate_github_app_token
+        uses: actions/create-github-app-token@v3
+        with:
+          client-id:   ${{ secrets.GH_APP_CLIENT_ID || vars.GH_APP_CLIENT_ID }}
+          private-key: ${{ secrets.GH_APP_PRIVATE_KEY || vars.GH_APP_PRIVATE_KEY }}
+          owner:       ${{ github.repository_owner }}
+
+      # --------------------------------------------------
+      # Step 3: Validate And Extract Repository Metadata
       # --------------------------------------------------
 
       - name: Validate Repository Metadata
@@ -144,7 +173,7 @@ jobs:
             core.setOutput("tenant", process.env.TENANT || "");
 
       # --------------------------------------------------
-      # Step 3: Ensure GitLab Project Exists
+      # Step 4: Ensure GitLab Project Exists
       # --------------------------------------------------
 
       - name: Ensure GitLab Project Exists
@@ -414,7 +443,7 @@ jobs:
             }
 
       # --------------------------------------------------
-      # Step 4: Configure Default Branch
+      # Step 5: Configure Default Branch
       # --------------------------------------------------
       #
       # 'main' is set as the default branch:
@@ -521,7 +550,7 @@ jobs:
             }
 
       # --------------------------------------------------
-      # Step 5: Enforce Branch Naming Policy
+      # Step 6: Enforce Branch Naming Policy
       # --------------------------------------------------
       #
       # Restricts branch creation on GitLab to the same compliant names this
@@ -624,16 +653,123 @@ jobs:
             }
 
       # --------------------------------------------------
-      # Step 6: Protect main & Release Branches
+      # Step 7: Detect Force-Push Protection Skip Flags
+      # --------------------------------------------------
+      #
+      # Org-wide kill switch, with a per-repo/per-branch opt-in underneath it:
+      #
+      #   ALLOW_SKIPPING_FORCE_PUSH_PROTECTION_ENFORCEMENT_ON_GITLAB
+      #     Must be 'true' at the ORG level specifically. Read via the
+      #     org-scoped REST endpoint (not the `vars.` expression context,
+      #     which would silently fall back to - or be shadowed by - a
+      #     repo-level variable of the same name). A repo cannot grant
+      #     itself this switch by defining the same-named variable locally.
+      #
+      #   SKIP_FORCE_PUSH_PROTECTION_ENFORCEMENT_ON_GITLAB_FOR_MAIN_BRANCH
+      #   SKIP_FORCE_PUSH_PROTECTION_ENFORCEMENT_ON_GITLAB_FOR_RELEASE_BRANCH
+      #     Only consulted when the org switch above is 'true'. Each must be
+      #     'true' at the REPO level specifically, via the repo-scoped REST
+      #     endpoint - again bypassing `vars.`, so an org-level variable of
+      #     the same name (however unlikely) cannot leak in as inherited.
+      #
+      # Any lookup failure (403 - the App token below isn't permissioned for
+      # this, network error, etc.) fails CLOSED: treated the same as "not
+      # set", so force-push protection stays fully enforced unless the
+      # opt-out chain is unambiguously proven to apply.
+
+      - name: Detect Force-Push Protection Skip Flags
+        id: detect_force_push_protection_skip_flags
+        if: ${{ steps.ensure_gitlab_project_exists.outputs.project_id != '' }}
+        uses: actions/github-script@v9
+        with:
+          github-token: ${{ steps.generate_github_app_token.outputs.token }}
+          script: |
+            const ORG_FLAG_NAME     = "ALLOW_SKIPPING_FORCE_PUSH_PROTECTION_ENFORCEMENT_ON_GITLAB";
+            const MAIN_SKIP_NAME    = "SKIP_FORCE_PUSH_PROTECTION_ENFORCEMENT_ON_GITLAB_FOR_MAIN_BRANCH";
+            const RELEASE_SKIP_NAME = "SKIP_FORCE_PUSH_PROTECTION_ENFORCEMENT_ON_GITLAB_FOR_RELEASE_BRANCH";
+
+            const org  = context.repo.owner;
+            const repo = context.repo.repo;
+
+            function isTrue(value) {
+              return typeof value === "string" && value.trim().toLowerCase() === "true";
+            }
+
+            // Reads a variable at EXACTLY the given scope. Unlike the `vars.`
+            // expression context (which merges repo-over-org for the same
+            // name), these REST endpoints only ever return what is actually
+            // defined at that one scope - a 404 here means "not set at this
+            // scope", full stop, regardless of what exists at the other scope.
+            async function getOrgVariableExact(name) {
+              try {
+                const res = await github.rest.actions.getOrgVariable({ org, name });
+                return res.data.value;
+              } catch (error) {
+                if (error.status === 404) {
+                  return null;
+                }
+                console.log(`  ⚠️ Could not read org-level variable '${name}' (status=${error.status || "?"}) - treating as not set. ${error.message}`);
+                return null;
+              }
+            }
+
+            async function getRepoVariableExact(name) {
+              try {
+                const res = await github.rest.actions.getRepoVariable({ owner: org, repo, name });
+                return res.data.value;
+              } catch (error) {
+                if (error.status === 404) {
+                  return null;
+                }
+                console.log(`  ⚠️ Could not read repo-level variable '${name}' (status=${error.status || "?"}) - treating as not set. ${error.message}`);
+                return null;
+              }
+            }
+
+            console.log("");
+            console.log("ℹ️ Checking for the org-level force-push protection opt-out...");
+            console.log("------------------------------------");
+
+            const orgFlagValue    = await getOrgVariableExact(ORG_FLAG_NAME);
+            const orgOptOutEnabled = isTrue(orgFlagValue);
+
+            if (!orgOptOutEnabled) {
+              console.log(`  ✓ '${ORG_FLAG_NAME}' is not 'true' at the org level - force-push protection stays fully enforced (normal behavior).`);
+              core.setOutput("skip_main", "false");
+              core.setOutput("skip_release", "false");
+              return;
+            }
+
+            console.log(`  ⚠️ '${ORG_FLAG_NAME}' = 'true' at the org level - this repo may opt out per branch via its OWN repo-level variables.`);
+
+            const mainSkipValue    = await getRepoVariableExact(MAIN_SKIP_NAME);
+            const releaseSkipValue = await getRepoVariableExact(RELEASE_SKIP_NAME);
+
+            const skipMain    = isTrue(mainSkipValue);
+            const skipRelease = isTrue(releaseSkipValue);
+
+            console.log(`  ${skipMain ? "⚠️" : "✓"} '${MAIN_SKIP_NAME}' (repo-level) = '${mainSkipValue ?? "(not set)"}' -> force-push enforcement on 'main' ${skipMain ? "SKIPPED" : "stays enforced"}`);
+            console.log(`  ${skipRelease ? "⚠️" : "✓"} '${RELEASE_SKIP_NAME}' (repo-level) = '${releaseSkipValue ?? "(not set)"}' -> force-push enforcement on release branches ${skipRelease ? "SKIPPED" : "stays enforced"}`);
+
+            core.setOutput("skip_main", skipMain ? "true" : "false");
+            core.setOutput("skip_release", skipRelease ? "true" : "false");
+
+      # --------------------------------------------------
+      # Step 8: Protect main & Release Branches
       # --------------------------------------------------
       #
       # 'main' and release branches (release/vX.Y, matched here via the wildcard
       # 'release/v*' - GitLab protected-branch names support glob wildcards
       # only, not full regex) get identical protection: push and merge
-      # restricted to Maintainers, force push disallowed. A rule can be created
-      # before the branch itself exists on GitLab (standard GitLab behavior -
-      # the protection simply applies once the branch is pushed), so this runs
-      # safely even for a project created earlier in this same job.
+      # restricted to Maintainers, force push disallowed by default - unless
+      # 'Detect Force-Push Protection Skip Flags' resolved a skip for that
+      # branch, in which case push/merge access are still fully enforced but
+      # the force-push setting is left exactly as GitLab currently has it
+      # (see the 'skipForcePushEnforcement' handling below). A rule can be
+      # created before the branch itself exists on GitLab (standard GitLab
+      # behavior - the protection simply applies once the branch is pushed),
+      # so this runs safely even for a project created earlier in this same
+      # job.
       #
       # Reconciliation deletes and re-creates a mismatched rule rather than
       # patching it in place, since not every field this workflow manages
@@ -648,6 +784,8 @@ jobs:
           GITLAB_HOST:      ${{ secrets.GITLAB_HOST || vars.GITLAB_HOST }}
           GITLAB_API_TOKEN: ${{ secrets.GITLAB_API_TOKEN || vars.GITLAB_API_TOKEN }}
           PROJECT_ID:       ${{ steps.ensure_gitlab_project_exists.outputs.project_id }}
+          SKIP_MAIN:        ${{ steps.detect_force_push_protection_skip_flags.outputs.skip_main }}
+          SKIP_RELEASE:     ${{ steps.detect_force_push_protection_skip_flags.outputs.skip_release }}
         with:
           script: |
             const GITLAB_HOST      = process.env.GITLAB_HOST;
@@ -656,16 +794,13 @@ jobs:
 
             const MAINTAINER = 40;
 
+            // Set only when 'Detect Force-Push Protection Skip Flags' resolved an
+            // approved org+repo opt-out for that branch - see this step's header
+            // comment. Push/merge access are unaffected either way.
             const PROTECTED_BRANCHES = [
-              { name : "main",       label : "main" },
-              { name : "release/v*", label : "release/vX.Y (release/v*)" }
+              { name : "main",       label : "main",                              skipForcePushEnforcement : process.env.SKIP_MAIN === "true" },
+              { name : "release/v*", label : "release/vX.Y (release/v*)",         skipForcePushEnforcement : process.env.SKIP_RELEASE === "true" }
             ];
-
-            const DESIRED = {
-              push_access_level  : MAINTAINER,
-              merge_access_level : MAINTAINER,
-              allow_force_push   : false
-            };
 
             async function glRequest(method, path, body) {
               const res = await fetch(`${GITLAB_HOST}/api/v4${path}`, {
@@ -718,28 +853,47 @@ jobs:
               return Array.isArray(levels) && levels.length === 1 && levels[0].access_level === expectedAccessLevel;
             }
 
-            function matches(rule) {
-              return levelMatches(rule.push_access_levels, DESIRED.push_access_level)
-                && levelMatches(rule.merge_access_levels, DESIRED.merge_access_level)
-                && rule.allow_force_push === DESIRED.allow_force_push;
+            // When force-push enforcement is skipped for this branch, whatever
+            // GitLab currently has for allow_force_push is accepted as-is - it is
+            // simply not part of what "matches" checks, so no in-place mismatch
+            // is ever reported for that field alone.
+            function matches(rule, skipForcePushEnforcement) {
+              const levelsOk = levelMatches(rule.push_access_levels, MAINTAINER)
+                && levelMatches(rule.merge_access_levels, MAINTAINER);
+              if (!levelsOk) {
+                return false;
+              }
+              return skipForcePushEnforcement ? true : rule.allow_force_push === false;
             }
 
-            async function ensureProtectedBranch(name, label) {
+            async function ensureProtectedBranch(name, label, skipForcePushEnforcement) {
               console.log("");
-              console.log(`ℹ️ Ensuring protected branch '${label}'...`);
+              console.log(`ℹ️ Ensuring protected branch '${label}'${skipForcePushEnforcement ? " (force-push enforcement SKIPPED for this branch)" : ""}...`);
               console.log("------------------------------------");
 
               const encodedName = encodeURIComponent(name);
               const existing = await glRequest("GET", `/projects/${PROJECT_ID}/protected_branches/${encodedName}`);
 
+              // Only meaningful when skipForcePushEnforcement AND a mismatched
+              // existing rule forces a delete+recreate below: carries the
+              // CURRENT allow_force_push value through unchanged, so the
+              // otherwise-unavoidable recreate never flips it on our behalf.
+              let preserveAllowForcePush;
+
               if (existing.status === 404) {
                 console.log(`  → Not protected yet - creating`);
               } else if (existing.ok) {
-                if (matches(existing.data)) {
-                  console.log(`  ✓ Already protected as required`);
+                if (matches(existing.data, skipForcePushEnforcement)) {
+                  const forcePushNote = skipForcePushEnforcement
+                    ? `force-push enforcement skipped (currently ${existing.data.allow_force_push ? "allowed" : "disallowed"} on GitLab - left untouched)`
+                    : "force-push=disallowed";
+                  console.log(`  ✓ Already protected as required (push=Maintainer, merge=Maintainer, ${forcePushNote})`);
                   return;
                 }
                 console.log(`  → Protection differs - re-creating`);
+                if (skipForcePushEnforcement) {
+                  preserveAllowForcePush = existing.data.allow_force_push;
+                }
                 const deleted = await glRequest("DELETE", `/projects/${PROJECT_ID}/protected_branches/${encodedName}`);
                 if (!deleted.ok) {
                   throw new Error(`Failed to unprotect '${name}' before re-creating -> ${deleted.status} ${describeGlError(deleted.data)}`);
@@ -748,23 +902,40 @@ jobs:
                 throw new Error(`Failed to fetch protected branch '${name}' -> ${existing.status} ${describeGlError(existing.data)}`);
               }
 
-              const created = await glRequest("POST", `/projects/${PROJECT_ID}/protected_branches`, { name, ...DESIRED });
+              const desired = { push_access_level : MAINTAINER, merge_access_level : MAINTAINER };
+              let forcePushNote;
+              if (!skipForcePushEnforcement) {
+                desired.allow_force_push = false;
+                forcePushNote = "force-push=disallowed";
+              } else if (preserveAllowForcePush !== undefined) {
+                // Recreating anyway for an unrelated (push/merge level) reason -
+                // still don't touch the existing force-push setting.
+                desired.allow_force_push = preserveAllowForcePush;
+                forcePushNote = `force-push enforcement skipped (carried over as ${preserveAllowForcePush ? "allowed" : "disallowed"})`;
+              } else {
+                // Brand-new rule with enforcement skipped: allow_force_push is
+                // omitted entirely rather than sent as true or false - GitLab's
+                // own platform default applies, we are not the one enforcing it.
+                forcePushNote = "force-push enforcement skipped (left to GitLab's own default on creation)";
+              }
+
+              const created = await glRequest("POST", `/projects/${PROJECT_ID}/protected_branches`, { name, ...desired });
               if (!created.ok) {
                 throw new Error(`Failed to protect '${name}' -> ${created.status} ${describeGlError(created.data)}`);
               }
-              console.log(`  ✓ Protected : push=Maintainer, merge=Maintainer, force-push=disallowed`);
+              console.log(`  ✓ Protected : push=Maintainer, merge=Maintainer, ${forcePushNote}`);
             }
 
             try {
-              for (const { name, label } of PROTECTED_BRANCHES) {
-                await ensureProtectedBranch(name, label);
+              for (const { name, label, skipForcePushEnforcement } of PROTECTED_BRANCHES) {
+                await ensureProtectedBranch(name, label, skipForcePushEnforcement);
               }
             } catch (error) {
               core.setFailed(`\n❌ Failed to protect main/release branches\n${error.message}`);
             }
 
       # --------------------------------------------------
-      # Step 7: Protect Version Tags
+      # Step 9: Protect Version Tags
       # --------------------------------------------------
       #
       # Tags matching v<major>.<minor>.<patch> are protected at the Maintainer
@@ -873,7 +1044,7 @@ jobs:
             }
 
       # --------------------------------------------------
-      # Step 8: Sync Reserved GitLab CICD Variables
+      # Step 10: Sync Reserved GitLab CICD Variables
       # --------------------------------------------------
       #
       # These variables are managed by this workflow and are treated as RESERVED:
@@ -1014,7 +1185,7 @@ jobs:
             }
 
       # --------------------------------------------------
-      # Step 9: Sync GitHub Variables To GitLab CICD
+      # Step 11: Sync GitHub Variables To GitLab CICD
       # --------------------------------------------------
 
       - name: Sync GitHub Variables To GitLab CICD
@@ -1515,19 +1686,7 @@ jobs:
             }
 
       # --------------------------------------------------
-      # Step 10: Generate GitHub App Token
-      # --------------------------------------------------
-
-      - name: Generate GitHub App Token
-        id: generate_github_app_token
-        uses: actions/create-github-app-token@v3
-        with:
-          client-id:   ${{ secrets.GH_APP_CLIENT_ID || vars.GH_APP_CLIENT_ID }}
-          private-key: ${{ secrets.GH_APP_PRIVATE_KEY || vars.GH_APP_PRIVATE_KEY }}
-          owner:       ${{ github.repository_owner }}
-
-      # --------------------------------------------------
-      # Step 11: Prepare Mirror Clone
+      # Step 12: Prepare Mirror Clone
       # --------------------------------------------------
       # Bare mirror clone of the GitHub repo + the GitLab remote. Shared by the
       # (optional) auto-build step and the full mirror push that follow. The
@@ -1564,7 +1723,7 @@ jobs:
           git remote add gitlab "$GITLAB_URL"
 
       # --------------------------------------------------
-      # Step 12: Sync Selected Branch & Report Image
+      # Step 13: Sync Selected Branch & Report Image
       # --------------------------------------------------
       # Owns the DISPATCHED branch: pushes it to GitLab (fast-forward by default,
       # --force only when force_push is ticked) so its pipeline is created. The
@@ -1781,7 +1940,7 @@ jobs:
           OUTCOME="success"; finish 0
 
       # --------------------------------------------------
-      # Step 13: Mirror Repository To GitLab
+      # Step 14: Mirror Repository To GitLab
       # --------------------------------------------------
 
       - name: Mirror Repository To GitLab
