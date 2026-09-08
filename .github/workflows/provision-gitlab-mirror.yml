@@ -1127,8 +1127,26 @@ jobs:
       # --------------------------------------------------
       #
       # These variables are managed by this workflow and are treated as RESERVED:
-      # the variable sync step never prunes them. This step publishes the reserved key
-      # list as its 'reserved_keys' output, which the 'Sync GitHub Variables' step reads.
+      # the variable sync step never prunes them, and the generic sync step (Step 12)
+      # never independently creates/updates/prunes them either - both defer entirely to
+      # this step. This step publishes the reserved key list as its 'reserved_keys'
+      # output, which the 'Sync GitHub Variables' step reads.
+      #
+      # 'GH_PROJECT_REPO' is always kept in sync (created and updated freely, as before).
+      #
+      # 'RUNNER_TAG' has different rules: its value is sourced from the 'GL__RUNNER_TAG'
+      # GitHub Actions variable (same 'GL__<name>' grammar Step 12 uses, so it stays
+      # visible/unprotected/raw/all-environments by construction). It is created when
+      # missing, but update and delete are each IGNORED BY DEFAULT once it exists - they
+      # only run when explicitly unlocked by a two-level flag pair (an org-level "allow"
+      # flag plus this repo's own "enable" flag, both 'true'):
+      #   update : ALLOW_ENABLING_RUNNER_TAG_VARIABLE_UPDATION_ON_GITLAB (org)
+      #            + ENABLE_RUNNER_TAG_VARIABLE_UPDATION_ON_GITLAB       (repo)
+      #   delete : ALLOW_ENABLING_RUNNER_TAG_VARIABLE_DELETION_ON_GITLAB (org)
+      #            + ENABLE_RUNNER_TAG_VARIABLE_DELETION_ON_GITLAB       (repo)
+      # Delete only ever applies when RUNNER_TAG exists in GitLab but 'GL__RUNNER_TAG' is
+      # no longer set in GitHub. The org flag is read at its own scope (never the merged
+      # 'vars.' context) so a repo cannot self-grant a capability the org has not unlocked.
 
       - name: Sync Reserved GitLab CICD Variables
         id: sync_reserved_gitlab_variables
@@ -1139,33 +1157,112 @@ jobs:
           GITLAB_API_TOKEN: ${{ secrets.GITLAB_API_TOKEN || vars.GITLAB_API_TOKEN }}
           PROJECT_ID:       ${{ steps.ensure_gitlab_project_exists.outputs.project_id }}
           GH_PROJECT_REPO:  ${{ github.repository }}
+          GL__RUNNER_TAG:   ${{ vars.GL__RUNNER_TAG }}
         with:
+          github-token: ${{ steps.generate_github_app_token.outputs.token }}
           script: |
             const GITLAB_HOST      = process.env.GITLAB_HOST;
             const GITLAB_API_TOKEN = process.env.GITLAB_API_TOKEN;
             const PROJECT_ID       = process.env.PROJECT_ID;
 
-            const VARIABLE_KEY   = "GH_PROJECT_REPO";
-            const VARIABLE_VALUE = process.env.GH_PROJECT_REPO;
+            const org  = context.repo.owner;
+            const repo = context.repo.repo;
+
+            const GH_PROJECT_REPO_KEY   = "GH_PROJECT_REPO";
+            const GH_PROJECT_REPO_VALUE = process.env.GH_PROJECT_REPO;
+
+            const RUNNER_TAG_KEY        = "RUNNER_TAG";
+            const RUNNER_TAG_GH_VALUE   = (process.env.GL__RUNNER_TAG || "").trim();
+            const RUNNER_TAG_GH_DEFINED = RUNNER_TAG_GH_VALUE.length > 0;
 
             // Reserved keys managed by this step. Published (early, so it is always set
-            // when this step runs) as an output so the variable sync step knows which
-            // project variables it must never prune.
-            const RESERVED_KEYS = [VARIABLE_KEY];
+            // when this step runs) as an output so the variable sync step (Step 12) knows
+            // which project variables it must never independently create, update, or prune.
+            const RESERVED_KEYS = [GH_PROJECT_REPO_KEY, RUNNER_TAG_KEY];
             core.setOutput("reserved_keys", JSON.stringify(RESERVED_KEYS));
+
+            function isTrue(value) {
+              return typeof value === "string" && value.trim().toLowerCase() === "true";
+            }
+
+            // Reads a variable at EXACTLY the given scope. Unlike the `vars.` expression
+            // context (which merges repo-over-org for the same name), these REST endpoints
+            // only ever return what is actually defined at that one scope - a 404 here
+            // means "not set at this scope", full stop, regardless of what exists at the
+            // other scope.
+            async function getOrgVariableExact(name) {
+              try {
+                const res = await github.rest.actions.getOrgVariable({ org, name });
+                return res.data.value;
+              } catch (error) {
+                if (error.status === 404) {
+                  return null;
+                }
+                console.log(`  ⚠️ Could not read org-level variable '${name}' (status=${error.status || "?"}) - treating as not set. ${error.message}`);
+                return null;
+              }
+            }
+
+            async function getRepoVariableExact(name) {
+              try {
+                const res = await github.rest.actions.getRepoVariable({ owner: org, repo, name });
+                return res.data.value;
+              } catch (error) {
+                if (error.status === 404) {
+                  return null;
+                }
+                console.log(`  ⚠️ Could not read repo-level variable '${name}' (status=${error.status || "?"}) - treating as not set. ${error.message}`);
+                return null;
+              }
+            }
+
+            // Resolves a two-level (org "allow" + repo "enable") governance gate for one
+            // RUNNER_TAG operation. Both must be 'true' for the operation to run.
+            async function resolveRunnerTagGate(label, orgFlagName, repoFlagName) {
+              console.log("");
+              console.log(`ℹ️ Checking the org-level opt-in for RUNNER_TAG ${label}...`);
+              console.log("------------------------------------");
+
+              const orgFlagValue = await getOrgVariableExact(orgFlagName);
+              const orgAllowed   = isTrue(orgFlagValue);
+
+              if (!orgAllowed) {
+                console.log(`  ✓ '${orgFlagName}' is not 'true' at the org level - RUNNER_TAG ${label} stays disabled (normal behavior).`);
+                return false;
+              }
+
+              console.log(`  ⚠️ '${orgFlagName}' = 'true' at the org level - this repo may enable RUNNER_TAG ${label} via its OWN repo-level variable.`);
+
+              const repoFlagValue = await getRepoVariableExact(repoFlagName);
+              const repoEnabled   = isTrue(repoFlagValue);
+
+              console.log(`  ${repoEnabled ? "⚠️" : "✓"} '${repoFlagName}' (repo-level) = '${repoFlagValue ?? "(not set)"}' -> RUNNER_TAG ${label} ${repoEnabled ? "ENABLED" : "stays disabled"}`);
+              return repoEnabled;
+            }
 
             // GitLab CICD variable options:
             //   environment_scope = "*"     -> all environments
             //   masked            = false   -> visible (not masked)
             //   protected         = false   -> not protected
             //   raw               = true    -> expansion disabled, value stored literally
-            const variableOptions = {
+            const ghProjectRepoOptions = {
               variable_type     : "env_var",
               environment_scope : "*",
               masked            : false,
               protected         : false,
               raw               : true,
               description       : "GitHub source repo of the project."
+            };
+
+            // Same GitLab options as above - fixed by the 'GL__RUNNER_TAG' naming grammar
+            // (empty flag block = no flags), not independently configurable here.
+            const runnerTagOptions = {
+              variable_type     : "env_var",
+              environment_scope : "*",
+              masked            : false,
+              protected         : false,
+              raw               : true,
+              description       : "Self-managed-runner failover tag, sourced from the 'GL__RUNNER_TAG' GitHub Actions variable. Created automatically when missing; update/delete on GitLab are ignored by default (see the RUNNER_TAG governance flags)."
             };
 
             async function glRequest(method, path, body) {
@@ -1219,48 +1316,133 @@ jobs:
             }
 
             console.log("");
-            console.log(`ℹ️ Ensuring GitLab CICD variable '${VARIABLE_KEY}'...`);
+            console.log(`ℹ️ Ensuring GitLab CICD variable '${GH_PROJECT_REPO_KEY}'...`);
             console.log("------------------------------------");
 
             try {
-              const existing = await glRequest("GET", `/projects/${PROJECT_ID}/variables/${VARIABLE_KEY}`);
+              const existing = await glRequest("GET", `/projects/${PROJECT_ID}/variables/${GH_PROJECT_REPO_KEY}`);
 
               if (existing.status === 404) {
-                console.log(`  → Variable not found - creating '${VARIABLE_KEY}'`);
+                console.log(`  → Variable not found - creating '${GH_PROJECT_REPO_KEY}'`);
                 const created = await glRequest("POST", `/projects/${PROJECT_ID}/variables`, {
-                  key   : VARIABLE_KEY,
-                  value : VARIABLE_VALUE,
-                  ...variableOptions
+                  key   : GH_PROJECT_REPO_KEY,
+                  value : GH_PROJECT_REPO_VALUE,
+                  ...ghProjectRepoOptions
                 });
                 if (!created.ok) {
                   throw new Error(`Failed to create variable -> ${created.status} ${describeGlError(created.data)}`);
                 }
-                console.log(`  ✓ Variable created : ${VARIABLE_KEY}=${VARIABLE_VALUE}`);
+                console.log(`  ✓ Variable created : ${GH_PROJECT_REPO_KEY}=${GH_PROJECT_REPO_VALUE}`);
               } else if (existing.ok) {
-                const valueChanged = existing.data.value !== VARIABLE_VALUE;
+                const valueChanged = existing.data.value !== GH_PROJECT_REPO_VALUE;
                 const rawChanged   = existing.data.raw !== true;
 
                 if (!valueChanged && !rawChanged) {
-                  console.log(`  ✓ Variable already up to date : ${VARIABLE_KEY}=${VARIABLE_VALUE}`);
+                  console.log(`  ✓ Variable already up to date : ${GH_PROJECT_REPO_KEY}=${GH_PROJECT_REPO_VALUE}`);
                 } else {
                   const reasons = [];
-                  if (valueChanged) reasons.push(`value '${existing.data.value}' -> '${VARIABLE_VALUE}'`);
+                  if (valueChanged) reasons.push(`value '${existing.data.value}' -> '${GH_PROJECT_REPO_VALUE}'`);
                   if (rawChanged)   reasons.push(`raw ${existing.data.raw} -> true`);
-                  console.log(`  → Variable differs (${reasons.join(", ")}) - updating '${VARIABLE_KEY}'`);
-                  const updated = await glRequest("PUT", `/projects/${PROJECT_ID}/variables/${VARIABLE_KEY}`, {
-                    value : VARIABLE_VALUE,
-                    ...variableOptions
+                  console.log(`  → Variable differs (${reasons.join(", ")}) - updating '${GH_PROJECT_REPO_KEY}'`);
+                  const updated = await glRequest("PUT", `/projects/${PROJECT_ID}/variables/${GH_PROJECT_REPO_KEY}`, {
+                    value : GH_PROJECT_REPO_VALUE,
+                    ...ghProjectRepoOptions
                   });
                   if (!updated.ok) {
                     throw new Error(`Failed to update variable -> ${updated.status} ${describeGlError(updated.data)}`);
                   }
-                  console.log(`  ✓ Variable updated : ${VARIABLE_KEY}=${VARIABLE_VALUE}`);
+                  console.log(`  ✓ Variable updated : ${GH_PROJECT_REPO_KEY}=${GH_PROJECT_REPO_VALUE}`);
                 }
               } else {
                 throw new Error(`Unexpected response fetching variable -> ${existing.status} ${describeGlError(existing.data)}`);
               }
             } catch (error) {
-              core.setFailed(`\n❌ Failed to ensure GitLab CICD variable '${VARIABLE_KEY}'\n${error.message}`);
+              core.setFailed(`\n❌ Failed to ensure GitLab CICD variable '${GH_PROJECT_REPO_KEY}'\n${error.message}`);
+            }
+
+            console.log("");
+            console.log(`ℹ️ Ensuring GitLab CICD variable '${RUNNER_TAG_KEY}'...`);
+            console.log("------------------------------------");
+
+            try {
+              const existing = await glRequest("GET", `/projects/${PROJECT_ID}/variables/${RUNNER_TAG_KEY}`);
+
+              if (existing.status === 404) {
+                if (!RUNNER_TAG_GH_DEFINED) {
+                  console.log(`  ℹ️ '${RUNNER_TAG_KEY}' not found in GitLab and 'GL__${RUNNER_TAG_KEY}' is not set in GitHub Actions variables - nothing to create.`);
+                } else {
+                  console.log(`  → Variable not found - creating '${RUNNER_TAG_KEY}'`);
+                  const created = await glRequest("POST", `/projects/${PROJECT_ID}/variables`, {
+                    key   : RUNNER_TAG_KEY,
+                    value : RUNNER_TAG_GH_VALUE,
+                    ...runnerTagOptions
+                  });
+                  if (!created.ok) {
+                    throw new Error(`Failed to create variable -> ${created.status} ${describeGlError(created.data)}`);
+                  }
+                  console.log(`  ✓ Variable created : ${RUNNER_TAG_KEY}=${RUNNER_TAG_GH_VALUE}`);
+                }
+              } else if (existing.ok) {
+                if (!RUNNER_TAG_GH_DEFINED) {
+                  // Exists in GitLab, no longer (or never) defined in GitHub - deletion is
+                  // gated and, by default, skipped.
+                  const deletionEnabled = await resolveRunnerTagGate(
+                    "deletion",
+                    "ALLOW_ENABLING_RUNNER_TAG_VARIABLE_DELETION_ON_GITLAB",
+                    "ENABLE_RUNNER_TAG_VARIABLE_DELETION_ON_GITLAB"
+                  );
+
+                  if (deletionEnabled) {
+                    console.log(`  → 'GL__${RUNNER_TAG_KEY}' is not set in GitHub but '${RUNNER_TAG_KEY}' exists in GitLab, and RUNNER_TAG deletion is enabled - deleting`);
+                    const deleted = await glRequest("DELETE", `/projects/${PROJECT_ID}/variables/${RUNNER_TAG_KEY}`);
+                    if (!deleted.ok && deleted.status !== 404) {
+                      throw new Error(`Failed to delete variable -> ${deleted.status} ${describeGlError(deleted.data)}`);
+                    }
+                    console.log(`  ✓ Variable deleted : ${RUNNER_TAG_KEY}`);
+                  } else {
+                    console.log(`  ℹ️ '${RUNNER_TAG_KEY}' exists in GitLab but 'GL__${RUNNER_TAG_KEY}' is not set in GitHub - deletion skipped by default (RUNNER_TAG deletion is not enabled).`);
+                  }
+                } else {
+                  const valueChanged     = existing.data.value !== RUNNER_TAG_GH_VALUE;
+                  const maskedChanged    = existing.data.masked !== false;
+                  const protectedChanged = existing.data.protected !== false;
+                  const rawChanged       = existing.data.raw !== true;
+                  const differs          = valueChanged || maskedChanged || protectedChanged || rawChanged;
+
+                  if (!differs) {
+                    console.log(`  ✓ Variable already up to date : ${RUNNER_TAG_KEY}=${RUNNER_TAG_GH_VALUE}`);
+                  } else {
+                    const updateEnabled = await resolveRunnerTagGate(
+                      "update",
+                      "ALLOW_ENABLING_RUNNER_TAG_VARIABLE_UPDATION_ON_GITLAB",
+                      "ENABLE_RUNNER_TAG_VARIABLE_UPDATION_ON_GITLAB"
+                    );
+
+                    if (updateEnabled) {
+                      const reasons = [];
+                      if (valueChanged)     reasons.push(`value '${existing.data.value}' -> '${RUNNER_TAG_GH_VALUE}'`);
+                      if (maskedChanged)    reasons.push(`masked ${existing.data.masked} -> false`);
+                      if (protectedChanged) reasons.push(`protected ${existing.data.protected} -> false`);
+                      if (rawChanged)       reasons.push(`raw ${existing.data.raw} -> true`);
+                      console.log(`  → Variable differs (${reasons.join(", ")}) and RUNNER_TAG update is enabled - updating '${RUNNER_TAG_KEY}'`);
+                      const updated = await glRequest("PUT", `/projects/${PROJECT_ID}/variables/${RUNNER_TAG_KEY}`, {
+                        value : RUNNER_TAG_GH_VALUE,
+                        ...runnerTagOptions
+                      });
+                      if (!updated.ok) {
+                        throw new Error(`Failed to update variable -> ${updated.status} ${describeGlError(updated.data)}`);
+                      }
+                      console.log(`  ✓ Variable updated : ${RUNNER_TAG_KEY}=${RUNNER_TAG_GH_VALUE}`);
+                    } else {
+                      console.log(`  ℹ️ '${RUNNER_TAG_KEY}' differs from 'GL__${RUNNER_TAG_KEY}' in GitHub - update skipped by default (RUNNER_TAG update is not enabled).`);
+                    }
+                  }
+                }
+              } else {
+                throw new Error(`Unexpected response fetching variable -> ${existing.status} ${describeGlError(existing.data)}`);
+              }
+            } catch (error) {
+              core.setFailed(`\n❌ Failed to reconcile GitLab CICD variable '${RUNNER_TAG_KEY}'\n${error.message}`);
             }
 
       # --------------------------------------------------
@@ -1357,6 +1539,12 @@ jobs:
 
             const allGhVars    = JSON.parse(process.env.ALL_GH_VARS    || "{}");
             const allGhSecrets = JSON.parse(process.env.ALL_GH_SECRETS || "{}");
+
+            // Reserved keys are fully managed by 'Sync Reserved GitLab CICD Variables'
+            // (Step 11) and must never be independently created, updated, or pruned here -
+            // declared early so both the candidate-collection loop below and the prune
+            // loop further down can consult the same Set.
+            const RESERVED_KEYS = new Set(JSON.parse(process.env.RESERVED_KEYS || "[]"));
 
             // GitLab CICD variable options common to every synced variable:
             //   variable_type     = "env_var" -> environment variable
@@ -1497,13 +1685,29 @@ jobs:
 
             // Collect the variables to sync, resolving the GitLab key + flags from the name.
             // Scanning both variables and secrets keeps the flags driven purely by the name.
+            // Reserved keys (e.g. 'RUNNER_TAG', sourced from 'GL__RUNNER_TAG') are skipped
+            // here even though they match the naming grammar - Step 11 owns them entirely.
             const toSync = [];
+            const skippedReserved = [];
             for (const [sourceLabel, source] of [["variable", allGhVars], ["secret", allGhSecrets]]) {
               for (const [ghKey, value] of Object.entries(source)) {
                 const parsed = parseGlKey(ghKey);
-                if (parsed) {
-                  toSync.push({ ghKey, value, source : sourceLabel, ...parsed });
+                if (!parsed) {
+                  continue;
                 }
+                if (RESERVED_KEYS.has(parsed.glKey)) {
+                  skippedReserved.push({ ghKey, glKey : parsed.glKey });
+                  continue;
+                }
+                toSync.push({ ghKey, value, source : sourceLabel, ...parsed });
+              }
+            }
+
+            if (skippedReserved.length > 0) {
+              console.log("");
+              console.log("ℹ️ Skipping reserved-key candidate(s) - managed by 'Sync Reserved GitLab CICD Variables' instead:");
+              for (const { ghKey, glKey } of skippedReserved) {
+                console.log(`  - '${ghKey}' -> '${glKey}'`);
               }
             }
 
@@ -1612,11 +1816,9 @@ jobs:
             // neither a current sync candidate nor reserved. Deletion is limited to
             // project-level variables: the project variables endpoint never returns
             // group-level (inherited) variables, so those are always left untouched.
-            // Reserved variables are never pruned. The list is received from the
-            // 'Sync Reserved GitLab CICD Variables' step via its 'reserved_keys' output
-            // (a JSON array), rather than hard-coded here.
-            const RESERVED_KEYS = new Set(JSON.parse(process.env.RESERVED_KEYS || "[]"));
-            const desiredKeys   = new Set(toSync.map((v) => v.glKey));
+            // Reserved variables are never pruned (RESERVED_KEYS was already declared
+            // above, before the candidate-collection loop).
+            const desiredKeys = new Set(toSync.map((v) => v.glKey));
 
             async function listProjectVariables() {
               const all = [];
