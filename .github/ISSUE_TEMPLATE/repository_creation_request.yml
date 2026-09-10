@@ -91,6 +91,9 @@ body:
 
         - --- Documentation ---
         - doc
+
+        - --- Data ---
+        - config-storage     # PLACEHOLDER - rename to match our actual naming conventions
     validations:
       required: true
 

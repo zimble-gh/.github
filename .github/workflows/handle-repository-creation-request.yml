@@ -27,6 +27,10 @@ jobs:
       duplicate_success: ${{ steps.check_repository_existence.outputs.success }}
       duplicate_error: ${{ steps.check_repository_existence.outputs.error }}
 
+      enterprise_status: ${{ steps.verify_enterprise_plan.outputs.status }}
+      enterprise_success: ${{ steps.verify_enterprise_plan.outputs.success }}
+      enterprise_error: ${{ steps.verify_enterprise_plan.outputs.error }}
+
       create_status: ${{ steps.create_repository.outputs.status }}
       create_success: ${{ steps.create_repository.outputs.success }}
       create_error: ${{ steps.create_repository.outputs.error }}
@@ -80,6 +84,53 @@ jobs:
 
             function isChecked(block, label) {
               return block?.includes(`- [x] ${label}`);
+            }
+
+            // Guard against issue-template / workflow drift: every field this script parses is
+            // expected to render as a literal "### <label>" heading in the issue body (this is how
+            // GitHub issue forms render dropdown/input/textarea answers, regardless of whether the
+            // field was left blank). If a template edit renames or removes one of these labels
+            // without this script being updated to match, the heading will be entirely absent from
+            // the body - which is a different situation from a requester simply leaving a field
+            // blank (that still produces the heading, just with no/"_No response_" content below
+            // it). Detect that drift explicitly so it surfaces as an obvious platform-team issue
+            // rather than a confusing "Missing: <field>" message aimed at the requester.
+            const TEMPLATE_FIELD_LABELS = [
+              "Product Line",
+              "Aspect / Domain",
+              "Repository Name",
+              "Project Type",
+              "Repository Description \\(Max\\. 350 characters\\)",
+              "Repository Visibility",
+              "Repository Options \\(Optional\\)",
+              "Tenant Name \\(Optional\\)"
+            ];
+
+            function headingExists(label) {
+              return new RegExp(`^### ${label}`, "m").test(body);
+            }
+
+            const missingHeadings = TEMPLATE_FIELD_LABELS
+              .filter(label => !headingExists(label))
+              .map(label => label.replace(/\\/g, ""));
+
+            if (missingHeadings.length > 0) {
+              const msg = `🛠️ Template Mismatch Detected (this is not a requester error)
+
+            This workflow could not find the following expected field heading(s) in the issue body:
+
+            ${missingHeadings.map(h => `- ### ${h}`).join("\n")}
+
+            This usually means the issue template (\`.github/ISSUE_TEMPLATE/repository_creation_request.yml\`) had a field's label/heading changed or removed without this workflow's parsing script (\`.github/workflows/handle-repository-creation-request.yml\`) being updated to match.
+
+            👉 Requester: no action needed on your part - please notify the platform team.
+            👉 Platform team: reconcile the field labels in the issue template with the \`extract(...)\` calls in the workflow.
+            `;
+              core.setOutput("status", "TEMPLATE_MISMATCH");
+              core.setOutput("error", msg);
+              core.setOutput("warning", JSON.stringify([]));
+              core.setOutput("info", JSON.stringify([]));
+              return;
             }
 
             let errors = [];
@@ -249,9 +300,53 @@ jobs:
               }
             }
 
+      # Fails fast with a clear message when "Internal" visibility is requested but the org isn't
+      # actually on a GitHub Enterprise plan, instead of letting repos.createInOrg reject the
+      # request later with a generic, confusing API error.
+      #? Requires the GitHub App to have "Organization administration" (read) permission - the
+      #? `plan` field on the org is only populated for callers with sufficient org-admin access.
+      #? If it comes back undefined, this step treats it as "not enterprise" (fails closed).
+      - name: Verify Enterprise Plan for Internal Visibility
+        id: verify_enterprise_plan
+        if: steps.check_repository_existence.outputs.status == 'OK' && steps.validate_request.outputs.visibility == 'internal'
+        uses: actions/github-script@v9
+        with:
+          github-token: ${{ steps.generate_github_app_token.outputs.token }}
+          script: |
+            try {
+              const { data: org } = await github.rest.orgs.get({ org: context.repo.owner });
+              const planName = org.plan?.name;
+
+              if (planName !== "enterprise") {
+                const msg = `❌ "Internal" repository visibility was requested, but this organization is not on a GitHub Enterprise plan (current plan: ${planName || "unknown"}).
+
+            Internal visibility is only available to organizations owned by a GitHub Enterprise account.
+
+            👉 Please edit this issue and choose "Private" or "Public" visibility instead, or contact the platform team if this organization should be on an Enterprise plan.
+            `;
+                core.setOutput("status", "ENTERPRISE_REQUIRED");
+                core.setOutput("error", msg);
+                return;
+              }
+
+              core.setOutput("status", "OK");
+              core.setOutput("success", "✅ Organization plan supports Internal visibility.");
+            } catch (e) {
+              const msg = `❌ Failed to verify organization plan for Internal visibility.
+
+            Error: ${e.message}
+
+            👉 Please edit this issue and retry or contact the platform team if the issue persists.
+            `;
+              core.setOutput("status", "ERROR");
+              core.setOutput("error", msg);
+            }
+
       - name: Create Repository
         id: create_repository
-        if: steps.check_repository_existence.outputs.status == 'OK'
+        if: >
+          steps.check_repository_existence.outputs.status == 'OK' &&
+          (steps.validate_request.outputs.visibility != 'internal' || steps.verify_enterprise_plan.outputs.status == 'OK')
         uses: actions/github-script@v9
         env:
           FINAL_NAME: ${{ steps.validate_request.outputs.final_name }}
@@ -586,9 +681,61 @@ jobs:
         uses: actions/github-script@v9
         env:
           DATA: ${{ toJson(needs.provision_repository.outputs) }}
+          JOB_RESULT: ${{ needs.provision_repository.result }}
         with:
           script: |
-            const d = JSON.parse(process.env.DATA);
+            const jobResult = process.env.JOB_RESULT;
+
+            // provision_repository is a conditional job (see its `if:`). If the issue's title
+            // prefix or required label is mutated - or the issue isn't open - after the issue was
+            // opened, that job's run condition stops matching and it is SKIPPED rather than failed.
+            // This job runs unconditionally (`if: always()`) and normally reports on
+            // provision_repository's step outputs, but a skipped job produces none of those outputs
+            // - so without this check we'd fall through to an empty comment body, which the GitHub
+            // API rejects outright. Detect the skip explicitly and explain why, so it's obvious this
+            // isn't the requester's fault and how to retrigger provisioning.
+            if (jobResult === "skipped") {
+              const issue = context.payload.issue;
+              const reasons = [];
+
+              if (issue.state !== "open") {
+                reasons.push(`the issue state is "${issue.state}" (must be "open")`);
+              }
+
+              const labels = (issue.labels || []).map(l => l.name);
+              if (!labels.includes("repo-creation-request")) {
+                reasons.push("the `repo-creation-request` label is missing");
+              }
+
+              if (!issue.title.startsWith("[REPO-CREATION-REQUEST]")) {
+                reasons.push("the issue title no longer starts with `[REPO-CREATION-REQUEST]`");
+              }
+
+              const reasonText = reasons.length > 0
+                ? reasons.map(r => `- ${r}`).join("\n")
+                : "the trigger conditions for automated provisioning were not met (reason could not be determined - please contact the platform team)";
+
+              const body = `⚠️ Automated Provisioning Skipped
+            ---------
+
+            Automated repository provisioning did **not** run for this issue because:
+
+            ${reasonText}
+
+            👉 To retry: restore the required title prefix (\`[REPO-CREATION-REQUEST]\`) and the \`repo-creation-request\` label, make sure the issue is open, then edit the issue again to retrigger this workflow. Contact the platform team if you need help.
+            `;
+
+              await github.rest.issues.createComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: context.issue.number,
+                body
+              });
+
+              return;
+            }
+
+            const d = JSON.parse(process.env.DATA || "{}");
 
             let success = [];
             let warnings = [];
@@ -603,7 +750,7 @@ jobs:
               }
             }
 
-            if (d.validate_status === "PARSE_ERROR") {
+            if (d.validate_status === "PARSE_ERROR" || d.validate_status === "TEMPLATE_MISMATCH") {
               errors.push(d.validate_error);
             } else {
               if (d.validate_success) success.push(d.validate_success);
@@ -612,22 +759,26 @@ jobs:
 
             if (d.duplicate_status === "DUPLICATE_ERROR"
              || d.duplicate_status === "ERROR") errors.push(d.duplicate_error);
-            else if (d.duplicate_status === "OK") success.push(d.duplicate_success);  
+            else if (d.duplicate_status === "OK") success.push(d.duplicate_success);
+
+            if (d.enterprise_status === "ENTERPRISE_REQUIRED"
+             || d.enterprise_status === "ERROR") errors.push(d.enterprise_error);
+            else if (d.enterprise_status === "OK") success.push(d.enterprise_success);
 
             if (d.create_status === "ERROR") errors.push(d.create_error);
             else if (d.create_status === "OK") success.push(d.create_success);
 
             if (d.topics_status === "ERROR") warnings.push(d.topics_error);
-            else if (d.topics_status === "OK") success.push(d.topics_success);            
+            else if (d.topics_status === "OK") success.push(d.topics_success);
 
             if (d.metadata_status === "ERROR") warnings.push(d.metadata_error);
-            else if (d.metadata_status === "OK") success.push(d.metadata_success);            
+            else if (d.metadata_status === "OK") success.push(d.metadata_success);
 
             if (d.org_vars_status === "ERROR") warnings.push(d.org_vars_error);
-            else if (d.org_vars_status === "OK") success.push(d.org_vars_success);            
+            else if (d.org_vars_status === "OK") success.push(d.org_vars_success);
 
             if (d.secrets_status === "ERROR") warnings.push(d.secrets_error)
-            else if (d.secrets_status === "OK") success.push(d.secrets_success);            
+            else if (d.secrets_status === "OK") success.push(d.secrets_success);
 
             if (d.org_vars_info) info.push(d.org_vars_info);
 
@@ -647,6 +798,17 @@ jobs:
 
             if (info.length > 0) {
               body += `\n\nℹ️ Info:\n---------\n\n${info.join("\n\n")}`;
+            }
+
+            // Safety net: if provision_repository ran but somehow produced no reportable outputs
+            // (e.g. it failed before any step set its outputs, such as GitHub App token generation
+            // failing), fall back to a non-empty, still-informative comment instead of calling
+            // createComment with an empty body (which the API rejects).
+            if (!body) {
+              body = `⚠️ Automated provisioning did not produce a status report (job result: \`${jobResult}\`).
+
+            Please contact the platform team.
+            `;
             }
 
             await github.rest.issues.createComment({
