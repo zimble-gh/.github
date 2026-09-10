@@ -203,9 +203,8 @@ jobs:
 
               if (!m) {
                 errors.push(
-            `❌ "Source Repository URL" is not a valid GitHub repository URL.
-
-            Got: ${forkSourceUrlRaw}
+            `❌ Invalid source repository URL.
+            Provided value "${forkSourceUrlRaw}" is invalid.
 
             👉 Expected format:
             \`https://github.com/<owner>/<repo>\`
