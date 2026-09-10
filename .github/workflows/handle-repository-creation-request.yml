@@ -27,6 +27,10 @@ jobs:
       duplicate_success: ${{ steps.check_repository_existence.outputs.success }}
       duplicate_error: ${{ steps.check_repository_existence.outputs.error }}
 
+      fork_status: ${{ steps.verify_fork_source.outputs.status }}
+      fork_success: ${{ steps.verify_fork_source.outputs.success }}
+      fork_error: ${{ steps.verify_fork_source.outputs.error }}
+
       enterprise_status: ${{ steps.verify_enterprise_plan.outputs.status }}
       enterprise_success: ${{ steps.verify_enterprise_plan.outputs.success }}
       enterprise_error: ${{ steps.verify_enterprise_plan.outputs.error }}
@@ -102,8 +106,11 @@ jobs:
               "Project Type",
               "Repository Description \\(Max\\. 350 characters\\)",
               "Repository Visibility",
-              "Repository Options \\(Optional\\)",
+              "Source Repository URL \\(Optional - for forking\\)",
               "Tenant Name \\(Optional\\)"
+              // "Repository Options \\(Optional\\)" - removed along with the README-init field/logic
+              //   (see the fork feature note near the top of the file); no longer rendered by the
+              //   issue template, so it must not be checked here.
             ];
 
             function headingExists(label) {
@@ -142,7 +149,8 @@ jobs:
             const projectType    = extract("Project Type");
             const descriptionRaw = extract("Repository Description \\(Max\\. 350 characters\\)");
             const visibilityRaw  = extract("Repository Visibility");
-            const repoOptions    = extract("Repository Options \\(Optional\\)");
+            let forkSourceUrlRaw = extract("Source Repository URL \\(Optional - for forking\\)");
+            // const repoOptions = extract("Repository Options \\(Optional\\)"); // removed with README-init logic
             let tenant           = extract("Tenant Name \\(Optional\\)");
 
             if (projectType && projectType.startsWith("---")) {
@@ -151,6 +159,10 @@ jobs:
 
             if (!tenant || tenant === "_No response_" || tenant === "None") {
               tenant = null;
+            }
+
+            if (!forkSourceUrlRaw || forkSourceUrlRaw === "_No response_") {
+              forkSourceUrlRaw = null;
             }
 
             if (!product) errors.push("❌ Missing: Product Line");
@@ -169,9 +181,41 @@ jobs:
             else if (visibilityRaw?.includes("Internal")) visibility = "internal";
             else errors.push("❌ Invalid visibility option selected.");
 
-            let autoInit = false;
-            if (repoOptions) {
-              autoInit = isChecked(repoOptions, "Initialize repository with README");
+            // README-initialization support was removed when this fork feature was added - see the
+            // commented-out "Repository Options (Optional)" field in the issue template.
+            // let autoInit = false;
+            // if (repoOptions) {
+            //   autoInit = isChecked(repoOptions, "Initialize repository with README");
+            // }
+
+            // Accepts either the HTTPS form (https://github.com/<owner>/<repo>, optionally with a
+            // trailing "/" and/or ".git") or the SSH form (git@github.com:<owner>/<repo>.git). This
+            // only validates *shape* - whether the repo actually exists and is reachable with our
+            // GitHub App credentials is confirmed later by the "Verify Fork Source Repository" step,
+            // since that requires a live API call, not just string parsing.
+            let forkOwner = null;
+            let forkRepo = null;
+
+            if (forkSourceUrlRaw) {
+              const httpsMatch = forkSourceUrlRaw.match(/^https:\/\/github\.com\/([A-Za-z0-9-]+)\/([A-Za-z0-9_.-]+?)(?:\.git)?\/?$/);
+              const sshMatch    = forkSourceUrlRaw.match(/^git@github\.com:([A-Za-z0-9-]+)\/([A-Za-z0-9_.-]+?)(?:\.git)?$/);
+              const m = httpsMatch || sshMatch;
+
+              if (!m) {
+                errors.push(
+            `❌ "Source Repository URL" is not a valid GitHub repository URL.
+
+            Got: ${forkSourceUrlRaw}
+
+            👉 Expected format:
+            https://github.com/<owner>/<repo>
+            or
+            git@github.com:<owner>/<repo>.git`
+                );
+              } else {
+                forkOwner = m[1];
+                forkRepo = m[2];
+              }
             }
 
             let finalName = null;
@@ -255,9 +299,13 @@ jobs:
 
             core.setOutput("final_name", finalName);
             core.setOutput("visibility", visibility);
-            core.setOutput("auto_init", autoInit);
+            // core.setOutput("auto_init", autoInit); // removed with README-init logic
             core.setOutput("topics", JSON.stringify(topics));
             core.setOutput("metadata", JSON.stringify(metadata));
+            if (forkOwner) {
+              core.setOutput("fork_source_owner", forkOwner);
+              core.setOutput("fork_source_repo", forkRepo);
+            }
             core.setOutput("description", descriptionRaw.substring(0, 350));
 
       - name: Check Repository Existence
@@ -298,6 +346,54 @@ jobs:
                 core.setOutput("status", "ERROR");
                 core.setOutput("error", msg);
               }
+            }
+
+      # Fails fast with a clear message when the requested fork source repository doesn't exist,
+      # is malformed (already caught earlier in Validate Issue Input, but re-verified here for
+      # defense in depth), or isn't accessible with our GitHub App's credentials - instead of
+      # letting repos.createFork reject the request later with a generic, confusing API error.
+      - name: Verify Fork Source Repository
+        id: verify_fork_source
+        if: steps.check_repository_existence.outputs.status == 'OK' && steps.validate_request.outputs.fork_source_owner != ''
+        uses: actions/github-script@v9
+        env:
+          FORK_SOURCE_OWNER: ${{ steps.validate_request.outputs.fork_source_owner }}
+          FORK_SOURCE_REPO: ${{ steps.validate_request.outputs.fork_source_repo }}
+        with:
+          github-token: ${{ steps.generate_github_app_token.outputs.token }}
+          script: |
+            try {
+              const repo = await github.rest.repos.get({
+                owner: process.env.FORK_SOURCE_OWNER,
+                repo: process.env.FORK_SOURCE_REPO
+              });
+
+              core.setOutput("status", "OK");
+              core.setOutput("success", `✅ Source repository for fork verified: ${repo.data.html_url}`);
+            } catch (e) {
+              let msg;
+
+              if (e.status === 404) {
+                msg = `❌ The source repository for forking was not found (or is not accessible to our GitHub App).
+
+            Source: ${process.env.FORK_SOURCE_OWNER}/${process.env.FORK_SOURCE_REPO}
+
+            👉 Please edit this issue and confirm the "Source Repository URL" is correct and that the repository is public, or accessible to the platform's GitHub App, and try again.
+            `;
+                core.setOutput("status", "FORK_SOURCE_NOT_FOUND");
+              } else {
+                msg = `❌ Failed to verify the source repository for forking.
+
+            Source: ${process.env.FORK_SOURCE_OWNER}/${process.env.FORK_SOURCE_REPO}
+
+            Error: ${e.message}
+
+            👉 Please edit this issue and retry or contact the platform team if the issue persists.
+            `;
+                core.setOutput("status", "ERROR");
+              }
+
+              core.setOutput("error", msg);
             }
 
       # Fails fast with a clear message when "Internal" visibility is requested but the org isn't
@@ -346,30 +442,70 @@ jobs:
         id: create_repository
         if: >
           steps.check_repository_existence.outputs.status == 'OK' &&
-          (steps.validate_request.outputs.visibility != 'internal' || steps.verify_enterprise_plan.outputs.status == 'OK')
+          (steps.validate_request.outputs.visibility != 'internal' || steps.verify_enterprise_plan.outputs.status == 'OK') &&
+          (steps.validate_request.outputs.fork_source_owner == '' || steps.verify_fork_source.outputs.status == 'OK')
         uses: actions/github-script@v9
         env:
           FINAL_NAME: ${{ steps.validate_request.outputs.final_name }}
           DESCRIPTION: ${{ steps.validate_request.outputs.description }}
           VISIBILITY: ${{ steps.validate_request.outputs.visibility }}
-          AUTO_INIT: ${{ steps.validate_request.outputs.auto_init }}
+          FORK_SOURCE_OWNER: ${{ steps.validate_request.outputs.fork_source_owner }}
+          FORK_SOURCE_REPO: ${{ steps.validate_request.outputs.fork_source_repo }}
         with:
           github-token: ${{ steps.generate_github_app_token.outputs.token }}
           script: |
             try {
-              const repo = await github.rest.repos.createInOrg({
-                org: context.repo.owner,
-                name: process.env.FINAL_NAME,
-                description: process.env.DESCRIPTION,
-                visibility: process.env.VISIBILITY,
-                allow_merge_commit: false,
-                allow_squash_merge: false,
-                allow_update_branch: true,
-                auto_init: process.env.AUTO_INIT === "true"
-              });
+              const isFork = !!process.env.FORK_SOURCE_OWNER;
 
-              core.setOutput("status", "OK");
-              core.setOutput("success", `✅ Repository created successfully.\n\n🔗 ${repo.data.html_url}`);
+              if (isFork) {
+                const forked = await github.rest.repos.createFork({
+                  owner: process.env.FORK_SOURCE_OWNER,
+                  repo: process.env.FORK_SOURCE_REPO,
+                  organization: context.repo.owner,
+                  name: process.env.FINAL_NAME
+                });
+
+                // repos.createFork doesn't accept description/visibility/merge-strategy options up
+                // front - and a fork's visibility generally follows its source repo - so best-effort
+                // align what we can afterwards. The fork itself (the primary deliverable) already
+                // succeeded above, so a failure here is reported as a warning within the success
+                // message rather than failing this step.
+                let alignmentNote = "";
+                try {
+                  await github.rest.repos.update({
+                    owner: context.repo.owner,
+                    repo: process.env.FINAL_NAME,
+                    description: process.env.DESCRIPTION,
+                    visibility: process.env.VISIBILITY,
+                    allow_merge_commit: false,
+                    allow_squash_merge: false,
+                    allow_update_branch: true
+                  });
+                } catch (e) {
+                  alignmentNote = `\n\n⚠️ Forked repository created, but description/visibility/merge settings could not be fully aligned: ${e.message}`;
+                }
+
+                core.setOutput("status", "OK");
+                core.setOutput(
+                  "success",
+                  `✅ Repository forked successfully from ${process.env.FORK_SOURCE_OWNER}/${process.env.FORK_SOURCE_REPO}.\n\n🔗 ${forked.data.html_url}${alignmentNote}`
+                );
+              } else {
+                const repo = await github.rest.repos.createInOrg({
+                  org: context.repo.owner,
+                  name: process.env.FINAL_NAME,
+                  description: process.env.DESCRIPTION,
+                  visibility: process.env.VISIBILITY,
+                  allow_merge_commit: false,
+                  allow_squash_merge: false,
+                  allow_update_branch: true
+                  // auto_init / README-initialization removed - see the commented-out
+                  // "Repository Options (Optional)" field in the issue template.
+                });
+
+                core.setOutput("status", "OK");
+                core.setOutput("success", `✅ Repository created successfully.\n\n🔗 ${repo.data.html_url}`);
+              }
 
             } catch (e) {
               const msg = `❌ Failed to create repo.
@@ -760,6 +896,10 @@ jobs:
             if (d.duplicate_status === "DUPLICATE_ERROR"
              || d.duplicate_status === "ERROR") errors.push(d.duplicate_error);
             else if (d.duplicate_status === "OK") success.push(d.duplicate_success);
+
+            if (d.fork_status === "FORK_SOURCE_NOT_FOUND"
+             || d.fork_status === "ERROR") errors.push(d.fork_error);
+            else if (d.fork_status === "OK") success.push(d.fork_success);
 
             if (d.enterprise_status === "ENTERPRISE_REQUIRED"
              || d.enterprise_status === "ERROR") errors.push(d.enterprise_error);

@@ -106,6 +106,17 @@ body:
     validations:
       required: true
 
+  - type: input
+    id: fork_source_url
+    attributes:
+      label: Source Repository URL (Optional - for forking)
+      description: >-
+        If this new repository should be a fork of an existing GitHub repository, paste its URL
+        here. Leave blank to create a new, empty repository instead.
+      placeholder: https://github.com/owner/repo
+    validations:
+      required: false
+
   - type: dropdown
     id: tenant_name
     attributes:
@@ -149,13 +160,18 @@ body:
         - label: Security review required
         - label: Infra provisioning required
 
-  - type: checkboxes
-    id: repository_options
-    attributes:
-      label: Repository Options (Optional)
-      description: Select additional repository options
-      options:
-        - label: Initialize repository with README (Do NOT select in case you have already created the project locally with content)
+  # NOTE: README-initialization removed (commented out) when the "Source Repository URL" fork
+  # field above was introduced - a forked repository already carries the source repo's content, and
+  # this was the only option this field offered. Re-enable by uncommenting below (and the matching
+  # logic in handle-repository-creation-request.yml) if a non-README-init use for this field comes
+  # up again.
+  # - type: checkboxes
+  #   id: repository_options
+  #   attributes:
+  #     label: Repository Options (Optional)
+  #     description: Select additional repository options
+  #     options:
+  #       - label: Initialize repository with README (Do NOT select in case you have already created the project locally with content)
 
   - type: dropdown
     id: visibility
