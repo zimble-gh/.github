@@ -74,7 +74,7 @@ jobs:
       # run - a plain shallow checkout of this small repo is cheaper and doesn't touch API rate
       # limits at all.
       - name: Checkout Repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       # TODO: try actions/create-github-app-token@v3 in place of tibdex/github-app-token@v2
       #? tibdex/github-app-token@v2 is archived and perhaps lacks maintenance
