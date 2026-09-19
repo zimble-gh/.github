@@ -249,7 +249,14 @@ jobs:
               return;
             }
 
-            const DROPDOWN_FIELD_IDS = ["product_line", "aspect", "project_type", "tenant_name", "visibility", "initiative"];
+            const DROPDOWN_FIELD_IDS = [
+              "initiative",
+              "product_line",
+              "aspect",
+              "project_type",
+              "tenant_name",
+              "visibility"
+            ];
             const DROPDOWN_OPTIONS = {};
             const unparsableDropdownFields = [];
 
