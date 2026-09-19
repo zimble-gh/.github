@@ -950,7 +950,7 @@ jobs:
       - name: Copy Organization Variables to Repository
         id: copy_organization_variables
         continue-on-error: true
-        if: steps.create_repository.outputs.status == 'OK' && steps.validate_request.outputs.visibility == 'private'
+        if: steps.create_repository.outputs.status == 'OK'
         uses: actions/github-script@v9
         env:
           FINAL_NAME: ${{ steps.validate_request.outputs.final_name }}
@@ -1137,7 +1137,7 @@ jobs:
       - name: Sync Secrets to Repository
         id: sync_repository_secrets
         continue-on-error: true
-        if: steps.create_repository.outputs.status == 'OK' && steps.validate_request.outputs.visibility == 'private'
+        if: steps.create_repository.outputs.status == 'OK'
         uses: actions/github-script@v9
         env:
           GH_TOKEN: ${{ steps.generate_github_app_token.outputs.token }}
