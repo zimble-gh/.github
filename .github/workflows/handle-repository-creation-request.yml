@@ -64,6 +64,7 @@ jobs:
       visibility: ${{ steps.validate_request.outputs.visibility }}
       fork_source_owner: ${{ steps.validate_request.outputs.fork_source_owner }}
       fork_source_repo: ${{ steps.validate_request.outputs.fork_source_repo }}
+      fork_source_visibility: ${{ steps.verify_fork_source.outputs.source_visibility }}
       org_forking_needs_retry_disable: ${{ steps.create_repository.outputs.org_forking_needs_retry_disable }}
 
     steps:
@@ -589,8 +590,19 @@ jobs:
                 repo: process.env.FORK_SOURCE_REPO
               });
 
+              // Captured here (rather than re-fetched later) because this is the one place the
+              // source repo is already looked up for every fork request. Forwarded on to the
+              // align_forked_repository_settings job below, which needs it to decide whether the
+              // requester's desired visibility is actually reachable - GitHub never allows a fork
+              // to end up MORE open than its source (a fork of a private repo stays private
+              // forever, a fork of an internal repo stays internal-or-private forever, and this
+              // can't be changed after the fact by us or anyone else) - so that job clamps to this
+              // value instead of requesting something GitHub will reject.
+              const sourceVisibility = repo.data.visibility || (repo.data.private ? "private" : "public");
+
               core.setOutput("status", "OK");
               core.setOutput("success", `✅ Source repository for fork verified: ${repo.data.html_url}`);
+              core.setOutput("source_visibility", sourceVisibility);
             } catch (e) {
               let msg;
 
@@ -1184,6 +1196,9 @@ jobs:
           FINAL_NAME: ${{ needs.provision_repository.outputs.final_name }}
           DESCRIPTION: ${{ needs.provision_repository.outputs.description }}
           VISIBILITY: ${{ needs.provision_repository.outputs.visibility }}
+          FORK_SOURCE_OWNER: ${{ needs.provision_repository.outputs.fork_source_owner }}
+          FORK_SOURCE_REPO: ${{ needs.provision_repository.outputs.fork_source_repo }}
+          FORK_SOURCE_VISIBILITY: ${{ needs.provision_repository.outputs.fork_source_visibility }}
           ORG_FORKING_NEEDS_RETRY_DISABLE: ${{ needs.provision_repository.outputs.org_forking_needs_retry_disable }}
         with:
           github-token: ${{ steps.generate_github_app_token.outputs.token }}
@@ -1200,6 +1215,27 @@ jobs:
             const BASE_DELAY_MS = 10_000;
             const MAX_DELAY_MS = 60_000;
 
+            // GitHub never allows a fork to end up MORE open than the repository it was forked
+            // from (a fork of a private repo stays private forever, a fork of an internal repo
+            // stays internal-or-private forever), and this can't be changed after the fact - not
+            // by us, not by the requester, not even by hand in the repo's own Settings UI, where
+            // the "Change visibility" control is permanently disabled on any fork. Rather than
+            // let the repos.update call below fail outright on an unviable request (which would
+            // otherwise also block description/Issues/merge-setting alignment, even though only
+            // visibility was ever the problem), the requested visibility is clamped here to the
+            // most open value GitHub will actually accept for this fork, and the requester is
+            // told about the substitution as a warning further down.
+            const OPENNESS_RANK = { private: 0, internal: 1, public: 2 };
+            const VISIBILITY_LABELS = { private: "Private", internal: "Internal (Enterprise only)", public: "Public" };
+            const requestedVisibility = process.env.VISIBILITY;
+            const sourceVisibility = process.env.FORK_SOURCE_VISIBILITY;
+
+            const visibilityIsViable =
+              !sourceVisibility || OPENNESS_RANK[requestedVisibility] <= OPENNESS_RANK[sourceVisibility];
+            const effectiveVisibility = visibilityIsViable ? requestedVisibility : sourceVisibility;
+
+            const visibilityWarning = visibilityIsViable ? "" : `\n\n⚠️ Requested visibility "${VISIBILITY_LABELS[requestedVisibility]}" is not allowed for a fork of \`${process.env.FORK_SOURCE_OWNER}/${process.env.FORK_SOURCE_REPO}\` (visibility: ${VISIBILITY_LABELS[sourceVisibility]}) - GitHub never allows a fork to be more open than the repository it was forked from, and this can't be changed after the fact. Visibility has been kept at "${VISIBILITY_LABELS[sourceVisibility]}" instead.`;
+
             let lastError = null;
             let lastAttempt = 0;
             let alignedOk = false;
@@ -1211,7 +1247,7 @@ jobs:
                   owner: context.repo.owner,
                   repo: process.env.FINAL_NAME,
                   description: process.env.DESCRIPTION,
-                  visibility: process.env.VISIBILITY,
+                  visibility: effectiveVisibility,
                   allow_merge_commit: false,
                   allow_squash_merge: false,
                   allow_update_branch: true,
@@ -1274,14 +1310,14 @@ jobs:
               core.setOutput("status", "OK");
               core.setOutput(
                 "success",
-                `✅ Forked repository settings (description/visibility/merge options, Issues) aligned successfully for \`${process.env.FINAL_NAME}\` (attempt ${lastAttempt}/${MAX_ATTEMPTS}).${orgRestoreNote}`
+                `✅ Forked repository settings (description/visibility/merge options, Issues) aligned successfully for \`${process.env.FINAL_NAME}\` (attempt ${lastAttempt}/${MAX_ATTEMPTS}).${orgRestoreNote}${visibilityWarning}`
               );
             } else {
               const msg = `⚠️ Forked repository \`${process.env.FINAL_NAME}\` was created, but its description/visibility/merge/Issues settings could not be aligned (gave up after ${lastAttempt}/${MAX_ATTEMPTS} attempt(s)).
 
             Error: ${lastError?.message}
 
-            👉 You may need to update these settings manually, or contact the platform team if this keeps happening.${orgRestoreNote}
+            👉 You may need to update these settings manually, or contact the platform team if this keeps happening.${orgRestoreNote}${visibilityWarning}
             `;
               core.setOutput("status", "ERROR");
               core.setOutput("error", msg);
