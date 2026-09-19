@@ -1154,7 +1154,7 @@ jobs:
 
   # Runs independently of update_issue_status below (both just `needs: provision_repository`, so
   # they run in parallel rather than one blocking the other) - this job polls, with backoff, for the
-  # forked repo's description/visibility/merge settings to be alignable, since GitHub forks a repo's
+  # forked repo's description/visibility/merge/Issues settings to be alignable, since GitHub forks a repo's
   # content asynchronously and repos.update calls made too soon fail with "A previous repository
   # operation is still in progress." It reports its own result as a follow-up issue comment once
   # resolved (success or final failure), rather than making the main "repository created" comment
@@ -1214,7 +1214,17 @@ jobs:
                   visibility: process.env.VISIBILITY,
                   allow_merge_commit: false,
                   allow_squash_merge: false,
-                  allow_update_branch: true
+                  allow_update_branch: true,
+                  // GitHub's createFork API always creates forks with Issues disabled,
+                  // regardless of the source repository's own Issues setting - there's no
+                  // parameter on createFork itself to control this, so it has to be turned back
+                  // on here, alongside the other fork-time defaults this job already corrects.
+                  // This deliberately does NOT look at the source repo's has_issues value -
+                  // forked repos are always given Issues enabled, mirroring how a brand-new
+                  // (non-fork) repository behaves in the "Create Repository" step above, where
+                  // has_issues is left unset and GitHub's own default for newly created repos
+                  // (true) applies.
+                  has_issues: true
                   // No allow_forking here, deliberately - unlike a freshly created (non-fork) repo,
                   // a fork's forking-related state is already governed by the "Create Repository"
                   // step: a private/internal fork is already unforkable once the org-level "Allow
@@ -1264,10 +1274,10 @@ jobs:
               core.setOutput("status", "OK");
               core.setOutput(
                 "success",
-                `✅ Forked repository settings (description/visibility/merge options) aligned successfully for \`${process.env.FINAL_NAME}\` (attempt ${lastAttempt}/${MAX_ATTEMPTS}).${orgRestoreNote}`
+                `✅ Forked repository settings (description/visibility/merge options, Issues) aligned successfully for \`${process.env.FINAL_NAME}\` (attempt ${lastAttempt}/${MAX_ATTEMPTS}).${orgRestoreNote}`
               );
             } else {
-              const msg = `⚠️ Forked repository \`${process.env.FINAL_NAME}\` was created, but its description/visibility/merge settings could not be aligned (gave up after ${lastAttempt}/${MAX_ATTEMPTS} attempt(s)).
+              const msg = `⚠️ Forked repository \`${process.env.FINAL_NAME}\` was created, but its description/visibility/merge/Issues settings could not be aligned (gave up after ${lastAttempt}/${MAX_ATTEMPTS} attempt(s)).
 
             Error: ${lastError?.message}
 
